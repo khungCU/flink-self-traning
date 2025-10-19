@@ -1,4 +1,4 @@
-package flink.self.traning;
+package flink.self.traning.statelessTransformation;
 
 import java.util.ArrayList;
 import java.util.Arrays;

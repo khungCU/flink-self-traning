@@ -1,4 +1,4 @@
-package flink.self.traning;
+package flink.self.traning.statelessTransformation;
 
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;

@@ -1,4 +1,4 @@
-package flink.self.traning;
+package flink.self.traning.statelessTransformation;
 
 
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;

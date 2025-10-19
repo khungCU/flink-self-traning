@@ -4,6 +4,9 @@
 package flink.self.traning;
 
 import org.junit.jupiter.api.Test;
+
+import flink.self.traning.statelessTransformation.FilterApp;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class FirstAppTest {
