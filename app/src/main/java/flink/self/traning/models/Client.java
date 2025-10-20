@@ -6,6 +6,7 @@ public class Client {
     public String name;
     public String gender;
     public boolean vip;
+    public Integer score;
 
     public Client() {}
 
@@ -14,6 +15,15 @@ public class Client {
         this.name = name;
         this.gender = gender;
         this.vip = vip;
+        this.score = 0;
+    }
+
+    public Client(Integer id, String name, String gender, boolean vip, Integer score){
+        this.id = id;
+        this.name = name;
+        this.gender = gender;
+        this.vip = vip;
+        this.score = score;
     }
 
     public Integer getId(){
@@ -46,6 +56,14 @@ public class Client {
 
     public void setVip(Boolean vip) {
         this.vip = vip;
+    }
+
+    public Integer getScore() {
+        return this.score;
+    }
+
+    public void setScore(Integer score){
+        this.score = score;
     }
     
     @Override
