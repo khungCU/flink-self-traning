@@ -12,10 +12,15 @@ public class EventGeneratorFunction implements GeneratorFunction<Long, Event> {
             "remove_from_cart", "login", "logout", "search"
     };
 
-    private final Random random = new Random();
+    private Random random;
 
     @Override
     public Event map(Long index) throws Exception {
+        // Initialize Random lazily with a unique seed based on index and nanoTime
+        // This ensures each parallel instance gets different random sequences
+        random = new Random(index * 31L + System.nanoTime());
+        
+
         String eventName = EVENT_NAMES[random.nextInt(EVENT_NAMES.length)];
         Integer userId = random.nextInt(1000) + 1; // User IDs from 1 to 1000
         Long timestamp = System.currentTimeMillis();

@@ -24,8 +24,7 @@ public class EventGenerator {
         DataStreamSource<Event> stream =
                 env.fromSource(source,
                 WatermarkStrategy.noWatermarks(),
-                "Generator Source of Events")
-                .setParallelism(1);
+                "Generator Source of Events");
         
         stream.print();
 
