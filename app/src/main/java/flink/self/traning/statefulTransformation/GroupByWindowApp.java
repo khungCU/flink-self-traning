@@ -21,6 +21,10 @@ import org.apache.flink.util.Collector;
 import flink.self.traning.customDataGen.EventGeneratorFunction;
 import flink.self.traning.models.Event;
 
+/*
+ * This practice is for windowing without watermark 
+ */
+
 public class GroupByWindowApp {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();

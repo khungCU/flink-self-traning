@@ -52,7 +52,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = 'flink.self.traning.App'
+    mainClass = 'flink.self.traning.statefulTransformation.EnrichmentSimpleApp'
     applicationDefaultJvmArgs = [
         '--add-opens=java.base/java.lang=ALL-UNNAMED',
         '--add-opens=java.base/java.util=ALL-UNNAMED'
