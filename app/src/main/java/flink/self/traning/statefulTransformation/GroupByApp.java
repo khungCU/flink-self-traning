@@ -32,6 +32,8 @@ public class GroupByApp {
 
         // Use reduce to aggregate the total score
         // ReduceFunction works with the same input/output type (Client -> Client)
+        // with reduce method it can also provide a ProcessWindowFunction so it can change result type
+        // also the only way to get the context is also to provide a ProcessWindowFunction
         SingleOutputStreamOperator<Client> aggregated = ks.reduce(
             new ReduceFunction<Client>() {
                 @Override

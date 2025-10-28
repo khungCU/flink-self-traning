@@ -22,6 +22,7 @@ public class EventUserEnrichment {
         String EventName,
         Long EventTimestamp
     ){
+        this.id = id;
         this.userName = userName;
         this.gender = gender;
         this.isMembership = isMembership;
