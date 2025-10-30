@@ -24,8 +24,10 @@ ext {
 dependencies {
     // Use JUnit Jupiter for testing.
     testImplementation libs.junit.jupiter
+    testImplementation 'org.assertj:assertj-core:3.24.2'
 
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    
 
     // This dependency is used by the application.
     implementation libs.guava
@@ -41,6 +43,8 @@ dependencies {
 
     // allows using Flink's web UI when running in the IDE:
     implementation "org.apache.flink:flink-runtime-web:${flinkVersion}"
+    // allows using Flink's harness test
+    testImplementation "org.apache.flink:flink-test-utils:${flinkVersion}"
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
