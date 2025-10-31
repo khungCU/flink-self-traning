@@ -1,9 +1,10 @@
 package flink.self.traning.customDataGen;
 
-import flink.self.traning.models.Event;
+import java.util.Random;
+
 import org.apache.flink.connector.datagen.source.GeneratorFunction;
 
-import java.util.Random;
+import flink.self.traning.models.Event;
 
 public class EventGeneratorFunction implements GeneratorFunction<Long, Event> {
 

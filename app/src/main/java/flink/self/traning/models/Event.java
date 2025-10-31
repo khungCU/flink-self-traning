@@ -39,4 +39,13 @@ public class Event {
         return "Event( event_name: " + this.name + ", user_id: " + this.userId + ", timestamp: " + this.timestamp  + " )";
     }
 
+    public String toJson() {
+        return String.format(
+                "{\"name\":\"%s\",\"userId\":%d,\"timestamp\":%d}",
+                this.name,
+                this.userId,
+                this.timestamp
+        );
+    }
+
 }
