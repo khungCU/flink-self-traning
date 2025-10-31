@@ -82,3 +82,25 @@ tasks.named('test') {
         '--add-opens=java.base/java.util=ALL-UNNAMED'
     ]
 }
+
+// Create an executable JAR for the Kafka ProducerApp
+task producerJar(type: Jar) {
+    archiveBaseName = 'kafka-producer'
+    archiveVersion = '1.0.0'
+
+    manifest {
+        attributes(
+            'Main-Class': 'flink.self.traning.kafkaClient.ProducerApp'
+        )
+    }
+
+    // Include all dependencies in the JAR (fat JAR)
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    // Include the compiled classes
+    with jar
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
