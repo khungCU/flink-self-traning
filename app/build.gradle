@@ -13,6 +13,10 @@ plugins {
 repositories {
     // Use Maven Central for resolving dependencies.
     mavenCentral()
+    maven {
+        url "https://packages.confluent.io/maven"
+    }
+
 }
 
 ext {
@@ -45,6 +49,13 @@ dependencies {
     implementation "org.apache.flink:flink-runtime-web:${flinkVersion}"
     // allows using Flink's harness test
     testImplementation "org.apache.flink:flink-test-utils:${flinkVersion}"
+
+    // dependecies for kafka client
+    implementation group: 'org.slf4j', name: 'slf4j-nop', version: '2.0.3'
+    implementation group: 'org.apache.kafka', name: 'kafka-clients', version: '3.3.1'
+    // needed if OAuth is used; otherwise this can be left out.
+    // See: https://docs.confluent.io/platform/current/kafka/authentication_sasl/authentication_sasl_oauth.html
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.15.2'
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
