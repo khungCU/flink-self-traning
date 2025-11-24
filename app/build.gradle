@@ -56,6 +56,29 @@ dependencies {
     // needed if OAuth is used; otherwise this can be left out.
     // See: https://docs.confluent.io/platform/current/kafka/authentication_sasl/authentication_sasl_oauth.html
     implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.15.2'
+
+    // Slack dependency
+    implementation("com.slack.api:bolt-socket-mode:1.46.0")
+    implementation("org.glassfish.tyrus.bundles:tyrus-standalone-client:1.17")
+}
+
+run {
+    // Load environment variables from .env file
+    def envFile = rootProject.file('../.env')
+    if (envFile.exists()) {
+        envFile.readLines().each { line ->
+            def (key, value) = line.split('=', 2)
+            if (key && value) {
+                environment key, value
+            }
+        }
+    }
+
+    // Add JVM options for Java 9+ module system compatibility
+    jvmArgs = [
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED'
+    ]
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
