@@ -60,11 +60,14 @@ dependencies {
     // Slack dependency
     implementation("com.slack.api:bolt-socket-mode:1.46.0")
     implementation("org.glassfish.tyrus.bundles:tyrus-standalone-client:1.17")
+
+    // HTTP client for async weather API calls
+    implementation 'org.apache.httpcomponents:httpasyncclient:4.1.5'
 }
 
 run {
     // Load environment variables from .env file
-    def envFile = rootProject.file('../.env')
+    def envFile = new File(project.rootDir, '.env')
     if (envFile.exists()) {
         envFile.readLines().each { line ->
             def (key, value) = line.split('=', 2)
