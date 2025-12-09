@@ -4,10 +4,11 @@
 package flink.self.traning;
 
 import org.junit.jupiter.api.Test;
+
+import flink.self.training.flinkHarnessesTest.SingleOutputMapFunc;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
-
-import flink.self.traning.flinkHarnessesTest.SingleOutputMapFunc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

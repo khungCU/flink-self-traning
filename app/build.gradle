@@ -53,6 +53,8 @@ dependencies {
     // dependecies for kafka client
     implementation group: 'org.slf4j', name: 'slf4j-nop', version: '2.0.3'
     implementation group: 'org.apache.kafka', name: 'kafka-clients', version: '3.3.1'
+    // Confluent Kafka JSON serializer
+    implementation group: 'io.confluent', name: 'kafka-json-serializer', version: '7.5.0'
     // needed if OAuth is used; otherwise this can be left out.
     // See: https://docs.confluent.io/platform/current/kafka/authentication_sasl/authentication_sasl_oauth.html
     implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.15.2'
@@ -63,6 +65,9 @@ dependencies {
 
     // HTTP client for async weather API calls
     implementation 'org.apache.httpcomponents:httpasyncclient:4.1.5'
+
+    // import the local libs from models subproject
+    implementation project(':models')
 }
 
 run {
