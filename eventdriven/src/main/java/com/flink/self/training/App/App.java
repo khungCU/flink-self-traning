@@ -1,11 +1,11 @@
-package flink.self.traning.EventDriven.App;
+package com.flink.self.training.App;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
-import flink.self.traning.EventDriven.SlackSource.SlackMsgModel;
-import flink.self.traning.EventDriven.SlackSource.SlackSource;
+import com.flink.self.training.SlackSource.SlackMsgModel;
+import com.flink.self.training.SlackSource.SlackSource;
 
 public class App {
     public static void main(String[] args) throws Exception {

@@ -1,4 +1,4 @@
-package flink.self.traning.EventDriven.SlackSource;
+package com.flink.self.training.SlackSource;
 
 import java.util.Collections;
 import java.util.List;

@@ -12,3 +12,4 @@ plugins {
 
 rootProject.name = 'flink-self-traning'
 include('app')
+include('eventdriven')
