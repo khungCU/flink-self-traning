@@ -14,3 +14,4 @@ rootProject.name = 'flink-self-traning'
 include('app')
 include('eventdriven')
 include('models')
+include('flinkConnectorsApp')
