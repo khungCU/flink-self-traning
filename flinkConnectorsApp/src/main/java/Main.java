@@ -44,19 +44,19 @@ public class Main {
             .setParallelism(1);
         
         // // filter only update and delete event
-        // DataStream<ShipmentCdcEvent> shipmentFilteredStream = shipmentStream.filter(event -> event.getOp().equals("d")  || event.getOp().equals("u"));
+        DataStream<ShipmentCdcEvent> shipmentFilteredStream = shipmentStream.filter(event -> event.getOp().equals("d")  || event.getOp().equals("u"));
 
-        // // map to transform output event
-        // DataStream<String> outputStream = shipmentFilteredStream.map(event -> {
-        //     return switch (event.getOp()) {
-        //         case "d" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been deleted";
-        //         case "u" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been updated";
-        //         default -> "Unknown Event has been detected";
-        //     };
-        // });
+        // map to transform output event
+        DataStream<String> outputStream = shipmentFilteredStream.map(event -> {
+            return switch (event.getOp()) {
+                case "d" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been deleted";
+                case "u" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been updated";
+                default -> "Unknown Event has been detected";
+            };
+        });
 
         // Print the transformed output events
-        shipmentStream.print();
+        outputStream.print();
 
         env.execute("Print MySQL Snapshot + Binlog");
 

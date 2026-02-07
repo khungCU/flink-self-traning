@@ -15,7 +15,7 @@ flinkConnectorsApp/
 ├── src/main/java/Main.java          # Main Flink application
 ├── src/main/resources/
 │   └── application.properties       # MySQL connection configuration
-└── build.gradle                     # Dependencies (Flink 1.18.0, MySQL CDC 3.1.1)
+└── build.gradle                     # Dependencies (Flink 1.18.0, MySQL CDC 3.2.1)
 ```
 
 ## Quick Start
@@ -222,7 +222,7 @@ ext {
 
 dependencies {
     implementation "org.apache.flink:flink-streaming-java:${flinkVersion}"
-    implementation 'org.apache.flink:flink-connector-mysql-cdc:3.1.1'
+    implementation 'org.apache.flink:flink-connector-mysql-cdc:3.2.1'
     implementation "org.apache.flink:flink-connector-base:${flinkVersion}"
 }
 ```
@@ -262,6 +262,31 @@ Make sure Docker containers are running:
 ```bash
 docker compose ps
 ```
+
+### Debezium NoSuchMethodError
+
+**Error message:**
+```
+java.lang.NoSuchMethodError: 'void io.debezium.connector.mysql.MySqlConnection$MySqlConnectionConfiguration.<init>(io.debezium.config.Configuration, java.util.Properties)'
+```
+
+**Cause:** Version mismatch between `flink-connector-mysql-cdc` and the bundled Debezium library. This typically occurs with CDC connector version 3.1.1.
+
+**Solution:** Upgrade to a compatible CDC connector version:
+
+```groovy
+// In build.gradle, use 3.2.1 or later
+implementation 'org.apache.flink:flink-connector-mysql-cdc:3.2.1'
+```
+
+After updating, clean and rebuild:
+```bash
+./gradlew clean build --refresh-dependencies
+```
+
+**IDE cache issue:** If running from an IDE (VS Code, IntelliJ), the IDE may cache the old dependency. Either:
+1. Refresh Gradle projects in your IDE
+2. Run via Gradle CLI: `./gradlew :flinkConnectorsApp:run`
 
 ### Server ID Conflict Error
 

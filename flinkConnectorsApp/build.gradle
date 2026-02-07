@@ -58,8 +58,8 @@ dependencies {
     implementation("com.slack.api:bolt-socket-mode:1.46.0")
     implementation("org.glassfish.tyrus.bundles:tyrus-standalone-client:1.17")
 
-    // Flink MySQL source connector (3.1.1 is compatible with Flink 1.18.x)
-    implementation 'org.apache.flink:flink-connector-mysql-cdc:3.1.1'
+    // Flink MySQL source connector (3.2.1 is compatible with Flink 1.18.x)
+    implementation 'org.apache.flink:flink-connector-mysql-cdc:3.2.1'
     implementation "org.apache.flink:flink-connector-base:${flinkVersion}"
     implementation "org.apache.flink:flink-table-api-java:${flinkVersion}"
 }
