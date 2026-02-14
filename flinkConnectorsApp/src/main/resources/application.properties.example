@@ -8,3 +8,9 @@ mysql.database=your_database
 mysql.table=your_database.your_table
 mysql.username=your_username
 mysql.password=your_password
+
+postgres.hostname=localhost
+postgres.port=5432
+postgres.database=pgdb
+postgres.username=your_username
+postfres.password=your_password

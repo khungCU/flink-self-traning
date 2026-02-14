@@ -70,6 +70,74 @@ The codebase is organized as a Gradle multi-project:
 - **`models/`** - Shared data models (Java library project)
   - Event, User, Client, EventUserEnrichment POJOs
 
+## flinkConnectorsApp — CDC Mirror Pipeline
+
+A standalone sub-project (not part of the Gradle multi-project) that mirrors MySQL tables to Postgres/Snowflake in real-time using Flink CDC.
+
+### Build & Run
+
+```bash
+cd flinkConnectorsApp
+../gradlew run          # runs Main.java (requires Docker services + .env)
+../gradlew build        # compile only
+```
+
+Requires Docker services running: MySQL (`localhost:3306`), Postgres (`localhost:5432`). Config in `src/main/resources/application.properties`. Environment variables loaded from root `.env` file.
+
+### Architecture & Data Flow
+
+```
+MySQL (binlog) → MySqlSource → JsonCdcDeserializer → CdcEvent → keyBy(table) → PGSinker/SFSinker → Postgres/Snowflake
+```
+
+### Source Files
+
+| File | Purpose |
+|------|---------|
+| `Main.java` | Pipeline entry point. Configures MySqlSource, checkpointing (3s), keyBy(table), sinkTo(PGSinker) |
+| `MainV0.java` | Earlier version (single-table POJO approach, kept for reference) |
+| `deserializer/JsonCdcDeserializer.java` | Implements `DebeziumDeserializationSchema<CdcEvent>`. Extracts table name, op type, before/after JSON from Debezium `SourceRecord`. Uses Jackson `ObjectMapper` + `ObjectNode` to build JSON strings |
+| `deserializer/ShipmentDebeziumDeserializer.java` | Single-table POJO deserializer (earlier approach, kept for comparison) |
+| `model/CdcEvent.java` | Generic CDC event POJO: `table`, `op` (c/r/u/d), `before` (JSON string), `after` (JSON string) |
+| `model/Shipment.java` | Single-table POJO (used by V0 approach) |
+| `model/ShipmentCdcEvent.java` | Single-table CDC event (used by V0 approach) |
+| `sinker/PGSinker.java` | Postgres sink using `INSERT ... ON CONFLICT DO UPDATE`. Batched flush with JDBC transactions. Uses `getColumnTypes()` for boolean conversion |
+| `sinker/SFSinker.java` | Snowflake sink using `MERGE INTO ... USING`. Same batching pattern as PGSinker |
+
+### Key Design Decisions
+
+- **Multi-table generic approach**: `CdcEvent` carries table name + raw JSON, so one pipeline handles all tables without per-table POJOs
+- **keyBy(CdcEvent::getTable)**: Guarantees ordering per table. All events for a table go to the same subtask
+- **Batched flush**: `write()` buffers events, `flush()` executes all in a single JDBC transaction at checkpoint boundaries. Trade-off: up to checkpoint-interval latency for consistency
+- **getColumnTypes()**: Queries `information_schema.columns` once per table per writer to fix MySQL `TINYINT(1)` → boolean mismatch. Cached in plain `HashMap` (not Flink state)
+- **HikariCP connection pool**: Each `SinkWriter` instance has its own pool (max 10 connections)
+- **Serializable cast trick**: `(Serializable & Map<...>) primaryKeys` — makes the Map serializable for Flink's serialization without creating a new class
+
+### Dependencies (beyond standard Flink)
+
+| Dependency | Purpose |
+|------------|---------|
+| `flink-connector-mysql-cdc:3.2.1` | Debezium-based MySQL CDC source (transitively brings `kafka-connect-api`) |
+| `HikariCP:5.1.0` | JDBC connection pooling |
+| `postgresql:42.7.1` | Postgres JDBC driver |
+| `snowflake-jdbc:3.16.1` | Snowflake JDBC driver |
+| Jackson (transitive) | JSON processing via `ObjectMapper`, `JsonNode`, `ObjectNode` |
+
+### Lesson Docs (in `docs/`)
+
+Educational markdown files created alongside this module:
+
+| Doc | Covers |
+|-----|--------|
+| `debezium-deserializer-lesson.md` | `DebeziumDeserializationSchema`, Struct, single-table vs multi-table approaches |
+| `jackson-objectmapper-lesson.md` | ObjectMapper, ObjectNode vs JsonNode, tree model vs POJO binding |
+| `kafka-connect-data-lesson.md` | Struct, Field, SourceRecord, transitive dependency chain |
+| `flink-sink-lesson.md` | Sink2 API, SinkWriter lifecycle, sinkTo after map vs keyBy |
+| `java-sql-lesson.md` | Connection, PreparedStatement, ResultSet, transactions, dynamic SQL |
+| `hikari-quick-lesson.md` | HikariCP connection pooling |
+| `get-column-types-lesson.md` | information_schema queries, caching, boolean conversion |
+| `schema-conversion-tools-lesson.md` | AWS SCT, SnowConvert for DDL migration |
+
 ## Key Architecture Patterns
 
 ### Multi-Project Dependencies

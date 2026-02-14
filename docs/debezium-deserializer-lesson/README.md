@@ -1,0 +1,413 @@
+# Implementing DebeziumDeserializationSchema - Quick Lesson
+
+## What is it?
+
+`DebeziumDeserializationSchema<T>` is the interface you implement to tell Flink's MySQL CDC source **how to convert raw Debezium records into your Java objects**. Without it, Flink receives opaque `SourceRecord` objects and has no idea what to do with them.
+
+```
+MySQL binlog → Debezium → SourceRecord → ???  ← you fill this gap  → your Java type T
+```
+
+## Why is it needed?
+
+The MySQL CDC source connector is built on top of **Debezium**, which internally uses the **Kafka Connect** data format. A Debezium CDC record is NOT JSON and NOT a POJO — it's a Kafka Connect `SourceRecord` containing nested `Struct` objects. You need a deserializer to extract the fields you care about.
+
+## The Interface
+
+```java
+public interface DebeziumDeserializationSchema<T> extends Serializable, ResultTypeQueryable<T> {
+
+    // Called once per CDC event — extract fields and emit via collector
+    void deserialize(SourceRecord record, Collector<T> out) throws Exception;
+
+    // Tells Flink the output type (needed for serialization and optimization)
+    TypeInformation<T> getProducedType();
+}
+```
+
+Only two methods to implement. Let's understand each.
+
+## The Debezium Record Structure
+
+Before writing a deserializer, you need to understand what's inside a `SourceRecord`. The `record.value()` is a `Struct` with this shape:
+
+```
+SourceRecord.value() → Struct
+├── "op"      : String           ← "c" (create), "u" (update), "d" (delete), "r" (snapshot read)
+├── "ts_ms"   : Long             ← timestamp in milliseconds
+├── "source"  : Struct           ← metadata
+│   ├── "db"    : String         ← database name (e.g. "db_1")
+│   └── "table" : String        ← table name (e.g. "shipments")
+├── "before"  : Struct or null   ← row BEFORE the change (null for inserts)
+│   ├── "shipment_id" : Integer
+│   ├── "order_id"    : Integer
+│   ├── "origin"      : String
+│   └── "is_arrived"  : Short    ← MySQL TINYINT(1), NOT boolean!
+└── "after"   : Struct or null   ← row AFTER the change (null for deletes)
+    ├── "shipment_id" : Integer
+    ├── "order_id"    : Integer
+    ├── "origin"      : String
+    └── "is_arrived"  : Short
+```
+
+### What is a `Struct`?
+
+`Struct` is Kafka Connect's typed data container (from `org.apache.kafka.connect.data`). Think of it as a **typed Map with a schema attached**. Unlike a JSON object where everything is loosely typed, a `Struct` knows the exact type of every field.
+
+```java
+Struct value = (Struct) record.value();
+
+// Access fields by name — returns typed Java objects
+String op       = value.getString("op");          // typed access (String)
+Long tsMs       = value.getInt64("ts_ms");         // typed access (Long)
+Struct source   = value.getStruct("source");       // nested Struct
+Struct before   = value.getStruct("before");       // nullable — null for inserts
+Struct after    = value.getStruct("after");        // nullable — null for deletes
+
+// From nested Struct
+String table    = source.getString("table");
+Integer id      = after.getInt32("shipment_id");
+```
+
+Key `Struct` access methods:
+
+| Method | Returns | Use for |
+|--------|---------|---------|
+| `getString("field")` | `String` | VARCHAR, TEXT columns |
+| `getInt32("field")` | `Integer` | INT columns |
+| `getInt64("field")` | `Long` | BIGINT, timestamps |
+| `getInt16("field")` | `Short` | SMALLINT, TINYINT |
+| `getFloat64("field")` | `Double` | DOUBLE, DECIMAL |
+| `getBoolean("field")` | `Boolean` | Only if truly BOOLEAN |
+| `getStruct("field")` | `Struct` | Nested objects (before, after, source) |
+| `get("field")` | `Object` | Generic — when you don't know the type |
+| `schema()` | `Schema` | Access field names and types programmatically |
+
+## Approach 1: Single-Table (Typed POJO)
+
+The simplest approach — hardcode field-to-POJO mapping for one specific table.
+
+**File:** `deserializer/ShipmentDebeziumDeserializer.java`
+
+```java
+public class ShipmentDebeziumDeserializer
+        implements DebeziumDeserializationSchema<ShipmentCdcEvent> {
+
+    private static final long serialVersionUID = 1L;
+
+    @Override
+    public void deserialize(SourceRecord record, Collector<ShipmentCdcEvent> out) throws Exception {
+        Struct value = (Struct) record.value();
+        if (value == null) return;
+
+        ShipmentCdcEvent event = new ShipmentCdcEvent();
+        event.setOp(value.getString("op"));
+
+        Long tsMs = value.getInt64("ts_ms");
+        if (tsMs != null) event.setTsMs(tsMs);
+
+        Struct source = value.getStruct("source");
+        if (source != null) {
+            event.setDatabase(source.getString("db"));
+            event.setTable(source.getString("table"));
+        }
+
+        Struct before = value.getStruct("before");
+        if (before != null) event.setBefore(structToShipment(before));
+
+        Struct after = value.getStruct("after");
+        if (after != null) event.setAfter(structToShipment(after));
+
+        out.collect(event);
+    }
+
+    // Hardcoded mapping: Struct fields → Shipment POJO
+    private Shipment structToShipment(Struct struct) {
+        Shipment s = new Shipment();
+        s.setShipmentId(struct.getInt32("shipment_id"));
+        s.setOrderId(struct.getInt32("order_id"));
+        s.setOrigin(struct.getString("origin"));
+        s.setDestination(struct.getString("destination"));
+
+        // Gotcha: MySQL TINYINT(1) arrives as Short, not Boolean
+        Object isArrived = struct.get("is_arrived");
+        if (isArrived instanceof Boolean b)  s.setIsArrived(b);
+        else if (isArrived instanceof Short v)   s.setIsArrived(v != 0);
+        else if (isArrived instanceof Integer v)  s.setIsArrived(v != 0);
+
+        return s;
+    }
+
+    @Override
+    public TypeInformation<ShipmentCdcEvent> getProducedType() {
+        return TypeInformation.of(ShipmentCdcEvent.class);
+    }
+}
+```
+
+**Pros:** Type-safe, compile-time checks, easy to debug.
+**Cons:** One deserializer per table. 50 tables = 50 deserializers + 50 model classes.
+
+## Approach 2: Multi-Table (Generic JSON)
+
+Instead of mapping to a POJO, convert the Struct to a JSON string. Now one deserializer handles any table.
+
+**File:** `deserializer/JsonCdcDeserializer.java`
+
+```java
+public class JsonCdcDeserializer implements DebeziumDeserializationSchema<CdcEvent> {
+
+    private static final long serialVersionUID = 1L;
+    private transient ObjectMapper objectMapper;
+
+    private ObjectMapper getObjectMapper() {
+        if (objectMapper == null) objectMapper = new ObjectMapper();
+        return objectMapper;
+    }
+
+    @Override
+    public void deserialize(SourceRecord record, Collector<CdcEvent> out) throws Exception {
+        Struct value = (Struct) record.value();
+        if (value == null) return;
+
+        CdcEvent event = new CdcEvent();
+        event.setOp(value.getString("op"));
+
+        Long tsMs = value.getInt64("ts_ms");
+        if (tsMs != null) event.setTsMs(tsMs);
+
+        Struct source = value.getStruct("source");
+        if (source != null) {
+            event.setDatabase(source.getString("db"));
+            event.setTable(source.getString("table"));
+        }
+
+        // JSON strings instead of typed POJOs — works for any table
+        Struct before = value.getStruct("before");
+        if (before != null) event.setBefore(structToJson(before));
+
+        Struct after = value.getStruct("after");
+        if (after != null) event.setAfter(structToJson(after));
+
+        out.collect(event);
+    }
+
+    // Schema-driven: iterates over whatever fields the Struct has
+    private String structToJson(Struct struct) throws Exception {
+        ObjectNode node = getObjectMapper().createObjectNode();
+        for (Field field : struct.schema().fields()) {
+            String name = field.name();
+            Object val = struct.get(field);
+            switch (val) {
+                case null        -> node.putNull(name);
+                case Integer i   -> node.put(name, i);
+                case Long l      -> node.put(name, l);
+                case Double d    -> node.put(name, d);
+                case Float f     -> node.put(name, f);
+                case Boolean b   -> node.put(name, b);
+                case Short s     -> node.put(name, s);
+                case byte[] bytes -> node.put(name, bytes);
+                default          -> node.put(name, val.toString());
+            }
+        }
+        return getObjectMapper().writeValueAsString(node);
+    }
+
+    @Override
+    public TypeInformation<CdcEvent> getProducedType() {
+        return TypeInformation.of(CdcEvent.class);
+    }
+}
+```
+
+**Pros:** One class handles all tables. Add new tables with zero code changes.
+**Cons:** Loses compile-time type safety. JSON parsing needed downstream.
+
+## Side-by-Side Comparison
+
+| Aspect | Single-Table (POJO) | Multi-Table (JSON) |
+|--------|---------------------|--------------------|
+| **Output type** | `ShipmentCdcEvent` (typed before/after) | `CdcEvent` (JSON string before/after) |
+| **Struct → output** | Hardcoded field-by-field mapping | Schema-driven iteration (`struct.schema().fields()`) |
+| **Adding a new table** | New deserializer + new model class | No code change |
+| **Type safety** | Compile-time | Runtime (parse JSON downstream) |
+| **Downstream usage** | `event.getAfter().getOrigin()` | `objectMapper.readTree(event.getAfter()).get("origin")` |
+| **Best for** | 1-3 tables with complex business logic | Many tables, generic pipelines (mirroring) |
+
+## Key Concepts Deep Dive
+
+### 1. Why `Serializable`?
+
+```java
+public class JsonCdcDeserializer implements DebeziumDeserializationSchema<CdcEvent> {
+    private static final long serialVersionUID = 1L;
+```
+
+Flink ships your deserializer from the JobManager to TaskManagers over the network. Java serialization converts the object to bytes for transport. Every class that travels across the network must implement `Serializable`.
+
+`serialVersionUID` is a version number — if you change the class, bumping this value tells Java "the old serialized form is incompatible, don't try to deserialize it." If you don't declare it, Java generates one from the class structure, which can cause mysterious failures after minor code changes.
+
+### 2. Why `transient` on ObjectMapper?
+
+```java
+private transient ObjectMapper objectMapper;  // excluded from serialization
+```
+
+`ObjectMapper` is not serializable (it holds thread pools, caches, etc.). Marking it `transient` means Java skips it during serialization. After the deserializer arrives at the TaskManager and is deserialized, `objectMapper` is `null`. The lazy getter recreates it on first use:
+
+```java
+private ObjectMapper getObjectMapper() {
+    if (objectMapper == null) {             // null after deserialization
+        objectMapper = new ObjectMapper();  // recreate on TaskManager
+    }
+    return objectMapper;
+}
+```
+
+This is a standard Flink pattern for non-serializable resources. You'll see it with database connections, HTTP clients, etc.
+
+**Lifecycle visualization:**
+
+```
+JobManager                          TaskManager
+┌──────────────────┐   serialize   ┌──────────────────┐
+│ objectMapper = OM │ ──────────►  │ objectMapper = null│  (transient field lost)
+└──────────────────┘               └────────┬─────────┘
+                                            │ first deserialize() call
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ objectMapper = OM │  (lazy init recreates it)
+                                   └──────────────────┘
+```
+
+### 3. `Collector<T>` — How You Emit Records
+
+```java
+public void deserialize(SourceRecord record, Collector<CdcEvent> out) throws Exception {
+    // ...build event...
+    out.collect(event);   // emit into the DataStream
+}
+```
+
+`Collector` is Flink's output mechanism. Calling `out.collect(event)` pushes one record into the downstream DataStream. You can:
+- Call it **zero times** (filter out the record)
+- Call it **once** (1:1 mapping, normal case)
+- Call it **multiple times** (1:N fan-out, e.g. split one record into many)
+
+This is the same `Collector` interface used in `FlatMapFunction` and other Flink operators.
+
+### 4. `TypeInformation<T>` — Flink's Type System
+
+```java
+@Override
+public TypeInformation<CdcEvent> getProducedType() {
+    return TypeInformation.of(CdcEvent.class);
+}
+```
+
+Flink doesn't rely on Java generics at runtime (they're erased). Instead, it uses `TypeInformation` to understand how to serialize, compare, and hash your objects. `TypeInformation.of(CdcEvent.class)` tells Flink to use its POJO serializer for `CdcEvent`.
+
+Why does this matter? Flink uses this information to:
+- Serialize records when shuffling between tasks (`keyBy`, `rebalance`)
+- Store records in state (checkpoints, savepoints)
+- Optimize memory layout for performance
+
+If Flink can't infer the type (common with generics or lambdas), you get a `MissingTypeInfo` error at runtime — this method prevents that.
+
+### 5. Schema-Driven vs Hardcoded Field Access
+
+**Hardcoded (single-table):**
+```java
+// You must know every column name at compile time
+shipment.setShipmentId(struct.getInt32("shipment_id"));
+shipment.setOrderId(struct.getInt32("order_id"));
+shipment.setOrigin(struct.getString("origin"));
+```
+
+**Schema-driven (multi-table):**
+```java
+// Iterates over whatever fields exist — works for any table
+for (Field field : struct.schema().fields()) {
+    String name = field.name();     // discovered at runtime
+    Object val = struct.get(field); // generic access
+}
+```
+
+`struct.schema()` returns a `Schema` object describing the Struct's fields. `schema().fields()` returns a `List<Field>`, where each `Field` has a `.name()` and a `.schema()` (the field's type). This is how the generic deserializer handles any table without knowing column names in advance.
+
+### 6. MySQL CDC Type Gotcha: TINYINT(1) is NOT Boolean
+
+MySQL's `BOOLEAN` is actually `TINYINT(1)`. Debezium sends it as `Short` (0 or 1), NOT Java `Boolean`:
+
+```java
+// What you might expect:
+Boolean isArrived = struct.getBoolean("is_arrived");  // WRONG — throws exception
+
+// What actually works:
+Object isArrived = struct.get("is_arrived");          // returns Short(0) or Short(1)
+```
+
+This is why the single-table deserializer has special handling:
+
+```java
+Object isArrived = struct.get("is_arrived");
+if (isArrived instanceof Boolean b)   s.setIsArrived(b);      // just in case
+else if (isArrived instanceof Short v)  s.setIsArrived(v != 0); // the common case
+else if (isArrived instanceof Integer v) s.setIsArrived(v != 0); // MySQL version variance
+```
+
+And why the generic deserializer doesn't need to care — it stores `Short(0)` as JSON number `0`, and the **sink** handles the boolean conversion when writing to Postgres.
+
+## How to Wire It Up
+
+```java
+// In Main.java
+MySqlSource<CdcEvent> source = MySqlSource.<CdcEvent>builder()
+    .hostname("localhost")
+    .port(3306)
+    .databaseList("db_1")
+    .tableList("db_1.shipments,db_1.orders")    // multiple tables
+    .username("mysqluser")
+    .password("mysqlpw")
+    .serverId("7100-7104")
+    .deserializer(new JsonCdcDeserializer())     // ← your deserializer here
+    .startupOptions(StartupOptions.latest())
+    .build();
+
+DataStream<CdcEvent> cdcStream = env
+    .fromSource(source, WatermarkStrategy.noWatermarks(), "MySQL Source")
+    .setParallelism(1);
+```
+
+The `.deserializer()` builder method is where you plug in your implementation. The generic type `<CdcEvent>` on `MySqlSource.<CdcEvent>builder()` must match the type your deserializer produces.
+
+## Decision Flowchart: Which Approach to Use?
+
+```
+Do you need to listen to multiple tables?
+│
+├── No, just 1-2 tables
+│   └── Do you need compile-time type safety on the CDC fields?
+│       ├── Yes → Approach 1: Single-Table POJO deserializer
+│       └── No  → Either approach works, pick simpler one
+│
+└── Yes, 3+ tables
+    └── Do all tables go through the same generic pipeline (e.g. mirroring)?
+        ├── Yes → Approach 2: Generic JSON deserializer (one class for all)
+        └── No  → Approach 2 for source, then split by table downstream:
+                  stream.filter(e -> "orders".equals(e.getTable()))
+                        .map(e -> mapper.readValue(e.getAfter(), Order.class))
+```
+
+## TL;DR
+
+| Question | Answer |
+|----------|--------|
+| **What is it?** | Interface to convert Debezium `SourceRecord` → your Java type |
+| **How many methods?** | 2: `deserialize()` and `getProducedType()` |
+| **Input format** | Kafka Connect `Struct` (typed, schema-attached, NOT JSON) |
+| **Key gotcha** | MySQL `BOOLEAN` arrives as `Short(0/1)`, not Java `Boolean` |
+| **Single-table** | Map Struct fields to POJO (type-safe, one class per table) |
+| **Multi-table** | Convert Struct to JSON string (generic, one class for all) |
+| **Must be Serializable** | Yes — Flink ships it to TaskManagers over the network |
+| **Non-serializable fields** | Mark `transient`, recreate lazily after deserialization |

@@ -1,6 +1,4 @@
 import java.io.InputStream;
-import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -9,11 +7,10 @@ import org.apache.flink.cdc.connectors.mysql.table.StartupOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
-import deserializer.JsonCdcDeserializer;
-import model.CdcEvent;
-import sinker.PGSinker;
+import deserializer.ShipmentDebeziumDeserializer;
+import model.ShipmentCdcEvent;
 
-public class Main {
+public class MainV0 {
     public static void main(String[] args) throws Exception {
         Properties props = new Properties();
         try (InputStream input = Main.class.getClassLoader().getResourceAsStream("application.properties")) {
@@ -23,7 +20,7 @@ public class Main {
             props.load(input);
         }
 
-        MySqlSource<CdcEvent> mySQLSource = MySqlSource.<CdcEvent>builder()
+        MySqlSource<ShipmentCdcEvent> mySQLSource = MySqlSource.<ShipmentCdcEvent>builder()
             .hostname(props.getProperty("mysql.hostname"))
             .port(Integer.parseInt(props.getProperty("mysql.port")))
             .databaseList(props.getProperty("mysql.database"))
@@ -32,41 +29,39 @@ public class Main {
             .password(props.getProperty("mysql.password"))
             .serverId("7100-7104")
             .serverTimeZone("UTC")
-            .deserializer(new JsonCdcDeserializer())
+            .deserializer(new ShipmentDebeziumDeserializer())
             .startupOptions(StartupOptions.latest())
             .build();
 
+
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+
         env.enableCheckpointing(3000);
-
+        
         // Set parallelism to 1 for CDC source - MySQL binlog is a single stream
-        DataStream<CdcEvent> cdcStream = env.fromSource(mySQLSource, WatermarkStrategy.noWatermarks(), "MySQL Source")
+        DataStream<ShipmentCdcEvent> shipmentStream = env.fromSource(mySQLSource, WatermarkStrategy.noWatermarks(), "MySQL Source")
             .setParallelism(1);
+        
+        // filter only update and delete event
+        // DataStream<ShipmentCdcEvent> shipmentFilteredStream = shipmentStream.filter(event -> event.getOp().equals("d")  || event.getOp().equals("u"));
 
-        cdcStream.print();
+        // map to transform output event
+        // DataStream<String> outputStream = shipmentFilteredStream.map(event -> {
+        //     return switch (event.getOp()) {
+        //         case "d" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been deleted";
+        //         case "u" -> "Shipment ID: " + event.getBefore().getShipmentId() + " has been updated";
+        //         default -> "Unknown Event has been detected";
+        //     };
+        // });
 
-        // Primary key config per table - used for ON CONFLICT upsert
-        Map<String, List<String>> primaryKeys = Map.of(
-            "shipments",    List.of("shipment_id"),
-            "shipments_v0", List.of("shipment_id")
-        );
+        // Print the transformed output events
+        shipmentStream.print();
 
-        // Build Postgres JDBC URL from properties
-        String pgJdbcUrl = String.format("jdbc:postgresql://%s:%s/%s",
-            props.getProperty("postgres.hostname"),
-            props.getProperty("postgres.port"),
-            props.getProperty("postgres.database"));
+        // Sink into the postgres
 
-        // Sink CDC events to Postgres, keyed by table name for isolation
-        cdcStream
-            .keyBy(CdcEvent::getTable)
-            .sinkTo(new PGSinker(
-                pgJdbcUrl,
-                props.getProperty("postgres.username"),
-                props.getProperty("postgres.password"),
-                primaryKeys
-            ));
+        env.execute("Print MySQL Snapshot + Binlog");
 
-        env.execute("MySQL to Postgres CDC Mirror");
     }
 }
+
