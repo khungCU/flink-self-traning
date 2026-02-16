@@ -223,16 +223,89 @@ public class JsonCdcDeserializer implements DebeziumDeserializationSchema<CdcEve
 **Pros:** One class handles all tables. Add new tables with zero code changes.
 **Cons:** Loses compile-time type safety. JSON parsing needed downstream.
 
+## Approach 3: Hybrid (Generic Source + Typed Downstream)
+
+Best of both worlds — use the generic JSON deserializer at the source, then split into typed POJO streams downstream.
+
+```
+MySqlSource → JsonCdcDeserializer → CdcEvent (generic)
+                                        │
+                            ┌───────────┼───────────┐
+                            ▼           ▼           ▼
+                     filter("orders") filter("shipments") ...
+                            │           │
+                            ▼           ▼
+                     map → Order   map → Shipment    (type-safe POJOs)
+```
+
+**Why not type-safe at the deserializer level?** `MySqlSource<T>` takes a **single** type parameter `T`. You can't produce `Order` for one record and `Shipment` for another from the same source — Java generics don't support union types like that. So type safety must happen **downstream**, not at ingestion.
+
+### Option A: Filter + Map (simple, good for 2-3 tables)
+
+```java
+DataStream<CdcEvent> cdcStream = env
+    .fromSource(source, WatermarkStrategy.noWatermarks(), "MySQL Source");
+
+// Split into typed streams
+DataStream<Order> orders = cdcStream
+    .filter(e -> "orders".equals(e.getTable()))
+    .map(e -> objectMapper.readValue(e.getAfter(), Order.class));
+
+DataStream<Shipment> shipments = cdcStream
+    .filter(e -> "shipments".equals(e.getTable()))
+    .map(e -> objectMapper.readValue(e.getAfter(), Shipment.class));
+
+// Now you have full type safety downstream
+orders.keyBy(Order::getCustomerId).process(...);
+shipments.keyBy(Shipment::getOrderId).process(...);
+```
+
+Each `filter()` scans the full stream, so N tables = N passes. Fine for a few tables, inefficient for many.
+
+### Option B: Side Outputs (single pass, good for 4+ tables)
+
+```java
+OutputTag<Order> orderTag = new OutputTag<>("orders") {};
+OutputTag<Shipment> shipmentTag = new OutputTag<>("shipments") {};
+
+SingleOutputStreamOperator<CdcEvent> main = cdcStream
+    .process(new ProcessFunction<CdcEvent, CdcEvent>() {
+        private transient ObjectMapper mapper;
+
+        @Override
+        public void processElement(CdcEvent event, Context ctx, Collector<CdcEvent> out)
+                throws Exception {
+            if (mapper == null) mapper = new ObjectMapper();
+            String json = event.getAfter();
+            if (json == null) return;
+
+            switch (event.getTable()) {
+                case "orders"    -> ctx.output(orderTag, mapper.readValue(json, Order.class));
+                case "shipments" -> ctx.output(shipmentTag, mapper.readValue(json, Shipment.class));
+                default          -> out.collect(event); // unmatched tables pass through
+            }
+        }
+    });
+
+DataStream<Order> orders = main.getSideOutput(orderTag);
+DataStream<Shipment> shipments = main.getSideOutput(shipmentTag);
+```
+
+Side outputs route records in a **single pass** — one iteration over the stream instead of N filter operations. The main `Collector<CdcEvent>` handles unmatched tables (e.g. for generic mirroring), while `ctx.output()` sends matched tables to typed side streams.
+
+**Pros:** Type-safe downstream. One deserializer for all tables. Single pass with side outputs.
+**Cons:** More boilerplate than Approach 2. Still requires a POJO per table that needs typed processing.
+
 ## Side-by-Side Comparison
 
-| Aspect | Single-Table (POJO) | Multi-Table (JSON) |
-|--------|---------------------|--------------------|
-| **Output type** | `ShipmentCdcEvent` (typed before/after) | `CdcEvent` (JSON string before/after) |
-| **Struct → output** | Hardcoded field-by-field mapping | Schema-driven iteration (`struct.schema().fields()`) |
-| **Adding a new table** | New deserializer + new model class | No code change |
-| **Type safety** | Compile-time | Runtime (parse JSON downstream) |
-| **Downstream usage** | `event.getAfter().getOrigin()` | `objectMapper.readTree(event.getAfter()).get("origin")` |
-| **Best for** | 1-3 tables with complex business logic | Many tables, generic pipelines (mirroring) |
+| Aspect | Single-Table (POJO) | Multi-Table (JSON) | Hybrid (Generic + Typed) |
+|--------|---------------------|--------------------|--------------------------|
+| **Output type** | `ShipmentCdcEvent` (typed before/after) | `CdcEvent` (JSON string before/after) | `CdcEvent` at source → typed POJOs downstream |
+| **Struct → output** | Hardcoded field-by-field mapping | Schema-driven iteration (`struct.schema().fields()`) | Schema-driven at source, Jackson POJO binding downstream |
+| **Adding a new table** | New deserializer + new model class | No code change | No deserializer change, add POJO + filter/side output |
+| **Type safety** | Compile-time | Runtime (parse JSON downstream) | Compile-time after split |
+| **Downstream usage** | `event.getAfter().getOrigin()` | `objectMapper.readTree(event.getAfter()).get("origin")` | `order.getCustomerId()` (after split) |
+| **Best for** | 1-3 tables with complex business logic | Many tables, generic pipelines (mirroring) | Multiple tables with different business logic per table |
 
 ## Key Concepts Deep Dive
 
@@ -394,9 +467,10 @@ Do you need to listen to multiple tables?
 └── Yes, 3+ tables
     └── Do all tables go through the same generic pipeline (e.g. mirroring)?
         ├── Yes → Approach 2: Generic JSON deserializer (one class for all)
-        └── No  → Approach 2 for source, then split by table downstream:
-                  stream.filter(e -> "orders".equals(e.getTable()))
-                        .map(e -> mapper.readValue(e.getAfter(), Order.class))
+        └── No, different business logic per table
+            └── Approach 3: Hybrid — Generic JSON source + typed split downstream
+                ├── 2-3 typed tables → Option A: filter() + map() to POJOs
+                └── 4+ typed tables → Option B: Side outputs (single pass)
 ```
 
 ## TL;DR
@@ -409,6 +483,7 @@ Do you need to listen to multiple tables?
 | **Key gotcha** | MySQL `BOOLEAN` arrives as `Short(0/1)`, not Java `Boolean` |
 | **Single-table** | Map Struct fields to POJO (type-safe, one class per table) |
 | **Multi-table** | Convert Struct to JSON string (generic, one class for all) |
+| **Hybrid** | Generic JSON source → split into typed POJOs downstream (best of both) |
 | **Must be Serializable** | Yes — Flink ships it to TaskManagers over the network |
 | **Non-serializable fields** | Mark `transient`, recreate lazily after deserialization |
 
