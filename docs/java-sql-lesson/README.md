@@ -619,3 +619,28 @@ try (Connection conn = dataSource.getConnection();
 | **Transactions** | `setAutoCommit(false)` → multiple statements → `commit()` or `rollback()` |
 | **try-with-resources** | `try (Connection c = ...) { }` auto-closes even on exception |
 | **Why quote identifiers** | Prevents SQL injection on table/column names and handles reserved words |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Three core classes: Connection, PreparedStatement, ResultSet** — Connection opens a session, PreparedStatement sends parameterized SQL, ResultSet reads results. This is the foundation of all JDBC work
+2. **Always use `?` placeholders, never string concatenation** — `PreparedStatement` with `?` prevents SQL injection. This is non-negotiable in production code
+3. **Transactions = setAutoCommit(false) + commit/rollback** — without explicit transactions, each statement auto-commits. Wrapping multiple statements in a transaction makes them atomic (all-or-nothing)
+4. **try-with-resources guarantees cleanup** — `Connection`, `PreparedStatement`, and `ResultSet` all implement `AutoCloseable`. Using `try (var x = ...)` ensures they're closed even on exceptions
+5. **JDBC indexes are 1-based** — `ps.setObject(1, ...)` is the first placeholder, not `0`. This trips up every Java developer at least once
+
+### How This Helps You Understand the Flink Application
+
+- You can now read `PGSinker.executeUpsert()` and follow the dynamic SQL construction: building column lists, `?` placeholders, ON CONFLICT clause, then setting values with `ps.setObject()`
+- You understand why `flush()` uses `setAutoCommit(false)` + `commit()` — it's a batch transaction wrapping all CDC events for atomicity
+- You see why `getColumnTypes()` uses its own `try (Connection conn = ...)` — separate connection for metadata reads, not part of the write transaction
+
+### Other Benefits of This Knowledge
+
+- **Read any Java database code** — Spring JdbcTemplate, MyBatis, Hibernate all build on top of `java.sql`. Understanding raw JDBC means you can debug any ORM
+- **Build dynamic SQL generators** — the pattern of iterating columns and building SQL strings with `StringBuilder` is used in query builders, migration tools, and schema generators
+- **Work with any JDBC database** — Postgres, MySQL, Snowflake, Oracle, SQLite all speak JDBC. The same Connection/PreparedStatement/ResultSet pattern works for all of them
+- **Understand connection pool behavior** — HikariCP wraps `java.sql.Connection`. Knowing what `close()` does on a raw connection vs a pooled one prevents resource leaks

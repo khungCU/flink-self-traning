@@ -410,3 +410,27 @@ When you scale to 50 tables, that's when SCT or SnowConvert saves real time.
 | **Do I need them for 2 tables?** | Not really — manual conversion is fine. Worth it at 10+ tables |
 | **How to get MySQL DDL?** | `mysqldump --no-data db_name > schema.sql` |
 | **Key gotcha** | Verify type mappings match what Debezium sends (especially `TINYINT(1)` → `BOOLEAN`) |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Schema conversion is a one-time DDL step** — these tools convert `CREATE TABLE` statements between heterogeneous databases. They handle type mapping, syntax differences, and constraint translation
+2. **DDL vs DML distinction** — schema tools handle DDL (structure). Your Flink CDC pipeline handles DML (data). They complement each other
+3. **AWS SCT is free and multi-target** — works for MySQL → Postgres, Snowflake, Redshift, and more. Produces an assessment report showing what auto-converts and what needs manual fixes
+4. **SnowConvert is Snowflake-specific** — web, CLI, or Snowsight integration. Best choice when migrating specifically to Snowflake
+
+### How This Helps You Understand the Flink Application
+
+- You understand the full migration workflow: SCT/SnowConvert creates target tables first, then your Flink CDC pipeline replicates ongoing data changes
+- You see why `PGSinker` uses `INSERT ... ON CONFLICT` (Postgres syntax) while `SFSinker` uses `MERGE INTO` (Snowflake syntax) — these are the dialect differences that schema tools also handle
+- You understand the `TINYINT(1)` → `BOOLEAN` mapping at the DDL level, which connects to why `getColumnTypes()` exists at the DML level
+
+### Other Benefits of This Knowledge
+
+- **Scale to production migrations** — at 50+ tables, manual DDL conversion is error-prone. SCT/SnowConvert automate it and produce audit reports
+- **Handle stored procedures and views** — both tools convert not just tables but also views, functions, and triggers (with varying success)
+- **Plan database migrations** — the assessment report tells you upfront what percentage auto-converts and what needs manual work, helping scope migration projects
+- **Combine with DMS for full automation** — AWS DMS handles both schema conversion and ongoing replication, though you lose the flexibility of a custom Flink pipeline

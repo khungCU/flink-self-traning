@@ -484,3 +484,27 @@ Do records need to be processed in order?
 | **sinkTo after keyBy** | Hash-partitioned — ordering guaranteed per key |
 | **Which to use?** | CDC/database mirroring → always `keyBy` first for correctness |
 | **addSink vs sinkTo** | `addSink` is deprecated; use `sinkTo` with Sink2 API |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Sink2 API is a two-class pattern** — `Sink` (serializable factory) creates `SinkWriter` (stateful worker with resources). This separation exists because Flink serializes operators to ship them across the cluster
+2. **write() is just buffering, flush() does the real work** — never make external calls in `write()`. Batch everything and execute in `flush()` within a single transaction for atomicity
+3. **keyBy before sinkTo is critical for CDC** — without it, events for the same row can go to different subtasks and execute out of order, causing data corruption
+4. **Checkpoint-aligned flushing** — Flink calls `flush()` at checkpoint boundaries, meaning your sink latency is bounded by your checkpoint interval (e.g., 3 seconds)
+
+### How This Helps You Understand the Flink Application
+
+- You can now read `PGSinker.java` / `SFSinker.java` and understand the `write()` → `flush()` → `close()` lifecycle without guessing
+- You understand why `Main.java` uses `keyBy(CdcEvent::getTable)` before `.sinkTo()` — it's for ordering correctness, not performance
+- You see why `PGSinker` implements `Sink<CdcEvent>` (factory) and `PostgresWriter` implements `SinkWriter<CdcEvent>` (worker) as separate classes
+
+### Other Benefits of This Knowledge
+
+- **Build sinks for any destination** — Elasticsearch, S3, Redis, HTTP APIs. The same Sink2 pattern applies: buffer in write, batch-execute in flush
+- **Tune throughput vs latency** — increase checkpoint interval for bigger batches (higher throughput) or decrease for fresher data (lower latency)
+- **Implement exactly-once sinks** — by combining checkpoint-aligned flushing with two-phase commit (Flink's `TwoPhaseCommittingSink` interface extends this pattern)
+- **Migrate legacy sinks** — if you encounter `addSink` + `SinkFunction` in older codebases, you now know how to rewrite them using the modern Sink2 API

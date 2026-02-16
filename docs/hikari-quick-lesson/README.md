@@ -251,3 +251,26 @@ public class AsyncDatabaseLookup extends RichAsyncFunction<Event, EnrichedEvent>
 | **Performance gain?** | ~6-10x faster per query (eliminates connection overhead) |
 | **Difficulty?** | Drop-in replacement, just swap `DriverManager` for `HikariDataSource` |
 | **When to use?** | Any Java app that talks to a relational database |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Never open a new JDBC connection per query** — connection setup involves TCP handshake, TLS negotiation, and authentication. A pool pre-creates connections and reuses them
+2. **HikariCP is a drop-in replacement** — swap `DriverManager.getConnection()` for `dataSource.getConnection()` and you get pooling with zero logic changes
+3. **Pool sizing matters** — `maximumPoolSize` should match your concurrency. Too few = threads waiting; too many = database overloaded. For Flink sinks, 5-10 per writer is typical
+4. **Always close connections back to the pool** — `connection.close()` on a pooled connection doesn't actually close it, it returns it to the pool. Use try-with-resources to guarantee this
+
+### How This Helps You Understand the Flink Application
+
+- You can now read the `HikariConfig` setup in `PGSinker.java` / `SFSinker.java` and understand why each writer creates its own pool
+- You understand why `flush()` calls `dataSource.getConnection()` and wraps it in try-with-resources — it borrows from the pool and returns when done
+- You see why `close()` calls `dataSource.close()` — it shuts down the entire pool when the writer is destroyed
+
+### Other Benefits of This Knowledge
+
+- **Use in any Java backend** — Spring Boot, Micronaut, Quarkus all default to HikariCP. Understanding it here transfers directly
+- **Diagnose connection leaks** — if your Flink job hangs, it might be a connection not returned to the pool. HikariCP's leak detection (`leakDetectionThreshold`) helps find these
+- **Configure for cloud databases** — Snowflake, Aurora, Cloud SQL all benefit from connection pooling but may need adjusted timeouts (`connectionTimeout`, `idleTimeout`) for cloud network latency

@@ -410,3 +410,27 @@ root.get("missing");                  // null (NullPointerException if you chain
 | **When to use ObjectNode?** | When you're constructing JSON from non-JSON data (e.g. database rows, Structs) |
 | **Thread-safe?** | Yes — create one `ObjectMapper`, reuse across threads |
 | **In Flink?** | Mark `transient`, recreate lazily (not serializable) |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **ObjectMapper is the central engine** — one class handles all of: POJO to JSON, JSON to POJO, JSON to tree, tree to JSON. You don't need multiple libraries
+2. **Three approaches exist** — POJO binding (`readValue`/`writeValueAsString`), tree model (`readTree` → `JsonNode`), and manual build (`ObjectNode`). Pick based on whether your schema is known at compile time
+3. **JsonNode is read-only, ObjectNode is mutable** — `readTree()` gives you `JsonNode` for reading; `createObjectNode()` gives you `ObjectNode` for building. ObjectNode extends JsonNode
+4. **ObjectMapper is NOT serializable** — in Flink, mark it `transient` and recreate lazily. This is a common gotcha that causes `NotSerializableException` at deploy time
+
+### How This Helps You Understand the Flink Application
+
+- You can now read `JsonCdcDeserializer.java` and understand why it uses `ObjectNode.put()` to manually build JSON from Struct fields (there's no POJO for the generic multi-table approach)
+- You can read `PGSinker.java` and understand why it uses `objectMapper.readTree(json)` to parse the JSON back into a `JsonNode` tree for dynamic column extraction
+- You see the symmetry: deserializer builds JSON with ObjectNode → sinker reads it back with readTree
+
+### Other Benefits of This Knowledge
+
+- **Jackson is everywhere in Java** — Spring Boot, Kafka, Elasticsearch, AWS SDK all use Jackson internally. Mastering it here applies across your entire Java career
+- **Handle any API response** — when consuming REST APIs, use `readTree()` for dynamic JSON or `readValue()` for typed responses
+- **Build data transformations** — Jackson's tree model lets you transform JSON structures (add fields, rename keys, flatten nested objects) without creating intermediate POJOs
+- **Stream large JSON files** — Jackson's `JsonParser` (streaming API) can process gigabyte-scale JSON files without loading them into memory

@@ -411,3 +411,26 @@ Do you need to listen to multiple tables?
 | **Multi-table** | Convert Struct to JSON string (generic, one class for all) |
 | **Must be Serializable** | Yes — Flink ships it to TaskManagers over the network |
 | **Non-serializable fields** | Mark `transient`, recreate lazily after deserialization |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Debezium doesn't give you JSON** — it gives you Kafka Connect `Struct` objects with attached schemas. Understanding this prevents confusion when reading deserializer code
+2. **Two deserialization strategies exist** — single-table POJO (type-safe, one class per table) vs multi-table JSON (generic, one class for all tables). Know when to pick which
+3. **The `transient` + lazy init pattern** — any non-serializable resource (ObjectMapper, DB connections) in a Flink operator must be `transient` and recreated after deserialization. This pattern appears everywhere in Flink
+4. **TINYINT(1) arrives as Short, not Boolean** — this single gotcha causes runtime failures across Postgres and Snowflake sinks. Recognizing it saves hours of debugging
+
+### How This Helps You Understand the Flink Application
+
+- You can now read `JsonCdcDeserializer.java` and understand why it iterates `Struct.schema().fields()` instead of hardcoding field names
+- You understand why `ShipmentDebeziumDeserializer.java` (V0) was replaced — it only handles one table
+- You see why `CdcEvent` carries raw JSON strings instead of typed fields — it's the multi-table generic approach
+
+### Other Benefits of This Knowledge
+
+- **Build connectors for other CDC sources** — Debezium supports Postgres, MongoDB, SQL Server, Oracle. The same `DebeziumDeserializationSchema` pattern works for all of them
+- **Write custom Flink deserializers** — the `Serializable` + `transient` + `TypeInformation` pattern applies to any Flink deserialization interface (e.g., `KafkaDeserializationSchema`)
+- **Debug CDC pipelines** — when data looks wrong downstream, you can trace it back to the Struct and know exactly what Debezium sent vs what your deserializer produced

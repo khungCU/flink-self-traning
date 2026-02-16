@@ -264,3 +264,27 @@ private Map<String, String> getColumnTypes(String table) throws SQLException {
 | **Cache size for 50 tables?** | ~25KB — trivial |
 | **Picks up schema changes?** | No — restart the job to refresh. Adding columns usually works anyway |
 | **Could we skip it?** | Most types work without it. Exists mainly for the `BOOLEAN` edge case |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Type mismatches happen between heterogeneous databases** — MySQL `TINYINT(1)` becomes a Java `Short` in Debezium, then a JSON number, then an `Integer` in Jackson. Postgres rejects an Integer where it expects Boolean
+2. **`information_schema` is a standard metadata catalog** — every relational database has it. Querying `information_schema.columns` gives you column names and types at runtime without hardcoding
+3. **Cache once, use forever** — the column types don't change during a job's lifetime (usually), so querying once per table and caching in a `HashMap` is the right trade-off
+4. **This cache is NOT Flink state** — it's a plain Java `HashMap` inside the writer. It doesn't survive restarts or go into checkpoints. This is fine because re-querying on restart is cheap
+
+### How This Helps You Understand the Flink Application
+
+- You can now read the `convertValue()` method in `PGSinker.java` / `SFSinker.java` and understand why it checks the destination column type before calling `ps.setObject()`
+- You understand why `getColumnTypes()` gets its own Connection from the pool — it's a read-only metadata query, separate from the write transaction in `flush()`
+- You see the lazy initialization pattern: query on first event, not at startup
+
+### Other Benefits of This Knowledge
+
+- **Handle more type mismatches** — the same pattern extends to `TIMESTAMP`, `DECIMAL`, `JSON/JSONB` conversions between different databases
+- **Build schema-aware data pipelines** — querying `information_schema` at runtime lets you build fully dynamic pipelines that adapt to any table without code changes
+- **Apply to other destinations** — Snowflake, BigQuery, Redshift all have equivalent metadata catalogs. The `getColumnTypes()` pattern works for any JDBC-compatible destination
+- **Understand schema evolution** — knowing what happens when columns are added/changed/removed helps you design pipelines that gracefully handle schema drift

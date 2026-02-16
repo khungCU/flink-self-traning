@@ -358,3 +358,27 @@ for (Field field : struct.schema().fields()) {
 | **When to use typed access?** | Single-table deserializer: `struct.getInt32("id")` |
 | **When to use Field iteration?** | Multi-table generic deserializer: `struct.schema().fields()` loop |
 | **TINYINT(1) gotcha** | Arrives as `Short` (`INT16`), not `Boolean` — handle with `struct.get()` |
+
+---
+
+## Takeaways
+
+### What You Should Learn From This Doc
+
+1. **Debezium's internal format is Kafka Connect Struct, not JSON** — JSON is just a serialization option. Inside your deserializer, you work with `Struct` objects that have attached schemas
+2. **SourceRecord is the envelope, Struct is the data** — `sourceRecord.value()` gives you the top-level Struct containing `before`, `after`, `source`, and `op` fields
+3. **Struct is schema-attached** — unlike a `Map`, every Struct knows its field names and types. You can iterate `struct.schema().fields()` to discover columns dynamically
+4. **Transitive dependencies save you work** — `flink-connector-mysql-cdc` already pulls in `kafka-connect-api` through Debezium. Don't add it to Gradle manually or you risk version conflicts
+
+### How This Helps You Understand the Flink Application
+
+- You can now read `JsonCdcDeserializer.java` and understand what `sourceRecord.value()` returns — a Struct, not a String
+- You understand why the deserializer casts to `Struct` and calls `.schema().fields()` — it's iterating the CDC event's columns dynamically
+- You see why `struct.get(field)` returns `Object` — the generic accessor works for any column type, which is what the multi-table approach needs
+
+### Other Benefits of This Knowledge
+
+- **Write Kafka Connect transformations (SMTs)** — Single Message Transforms use the same Struct/Schema API to modify records in transit between connectors
+- **Build custom Kafka Connect connectors** — source connectors produce `SourceRecord`, sink connectors consume them. This is the same API
+- **Debug Debezium issues** — when CDC events look wrong, you can inspect the `Struct.schema()` to see what Debezium thinks the column types are
+- **Understand Kafka Connect ecosystem** — Debezium is just one connector. Others (JDBC Sink, S3, Elasticsearch) all use the same Struct/SourceRecord format internally
