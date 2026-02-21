@@ -4,7 +4,7 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 
-public class Shipment implements MessageNormalized {
+public class ShipmentV0 implements MessageNormalized {
     private static final long serialVersionUID = 1L;
 
     @JsonIgnore
@@ -18,7 +18,7 @@ public class Shipment implements MessageNormalized {
     private String destination;
     private Boolean isArrived;
 
-    public Shipment() {}
+    public ShipmentV0() {}
 
     @Override
     public String getOp() {
@@ -82,7 +82,7 @@ public class Shipment implements MessageNormalized {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
-        Shipment shipment = (Shipment) o;
+        ShipmentV0 shipment = (ShipmentV0) o;
         return Objects.equals(shipmentId, shipment.shipmentId);
     }
 
@@ -93,7 +93,7 @@ public class Shipment implements MessageNormalized {
 
     @Override
     public String toString() {
-        return "Shipment{" +
+        return "ShipmentV0{" +
                 "shipmentId=" + shipmentId +
                 ", orderId=" + orderId +
                 ", origin='" + origin + '\'' +

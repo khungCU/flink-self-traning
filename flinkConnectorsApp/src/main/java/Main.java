@@ -1,16 +1,19 @@
 import java.io.InputStream;
-import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.cdc.connectors.mysql.source.MySqlSource;
 import org.apache.flink.cdc.connectors.mysql.table.StartupOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.OutputTag;
 
 import deserializer.JsonCdcDeserializer;
 import model.CdcEvent;
+import model.MessageNormalized;
+import reconciliation.SchemaNormalizer;
+import reconciliation.TableRegistry;
 import sinker.PGSinker;
 
 public class Main {
@@ -45,11 +48,8 @@ public class Main {
 
         cdcStream.print();
 
-        // Primary key config per table - used for ON CONFLICT upsert
-        Map<String, List<String>> primaryKeys = Map.of(
-            "shipments",    List.of("shipment_id"),
-            "shipments_v0", List.of("shipment_id")
-        );
+        // Single source of truth for all per-table config
+        TableRegistry registry = new TableRegistry();
 
         // Build Postgres JDBC URL from properties
         String pgJdbcUrl = String.format("jdbc:postgresql://%s:%s/%s",
@@ -57,15 +57,27 @@ public class Main {
             props.getProperty("postgres.port"),
             props.getProperty("postgres.database"));
 
-        // Sink CDC events to Postgres, keyed by table name for isolation
-        cdcStream
+        // Normalize CDC events into typed POJOs, routed via per-table side outputs
+        SingleOutputStreamOperator<MessageNormalized> processed = cdcStream
             .keyBy(CdcEvent::getTable)
-            .sinkTo(new PGSinker(
-                pgJdbcUrl,
-                props.getProperty("postgres.username"),
-                props.getProperty("postgres.password"),
-                primaryKeys
-            ));
+            .process(new SchemaNormalizer(registry));
+
+        // Log schema-drift events (unknown tables) for alerting
+        processed.getSideOutput(registry.getUnknownTag()).print("schema-drift");
+
+        // Union known-table side outputs and sink to Postgres
+        DataStream<MessageNormalized> normalizedStream = null;
+        for (OutputTag<MessageNormalized> tag : registry.getAllKnownTags()) {
+            DataStream<MessageNormalized> sideOutput = processed.getSideOutput(tag);
+            normalizedStream = (normalizedStream == null) ? sideOutput : normalizedStream.union(sideOutput);
+        }
+
+        normalizedStream.sinkTo(new PGSinker(
+            pgJdbcUrl,
+            props.getProperty("postgres.username"),
+            props.getProperty("postgres.password"),
+            registry.getPrimaryKeys()
+        ));
 
         env.execute("MySQL to Postgres CDC Mirror");
     }

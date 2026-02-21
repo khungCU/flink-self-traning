@@ -1,32 +1,32 @@
 package sinker;
 
 import java.io.IOException;
-import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.connector.sink2.SinkWriter;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
-import model.CdcEvent;
+import model.MessageNormalized;
 
 /**
- * Generic Postgres sink that mirrors CDC events from any table.
+ * Generic Postgres sink that mirrors MessageNormalized events from any table.
  *
- * Dynamically builds upsert/delete SQL from the JSON payload in CdcEvent,
- * so no per-table POJO or SQL is needed. Only requires a primary key config
- * to know which columns form the ON CONFLICT clause.
+ * Uses reflection on the POJO to extract field names (camelCase → snake_case)
+ * and values for dynamic SQL generation. Metadata fields (op, table) are excluded.
  *
  * Usage:
  * <pre>
@@ -35,12 +35,10 @@ import model.CdcEvent;
  *     "orders",    List.of("order_id")
  * );
  *
- * cdcStream
- *     .keyBy(CdcEvent::getTable)
- *     .sinkTo(new PGSinker(jdbcUrl, user, password, primaryKeys));
+ * normalizedStream.sinkTo(new PGSinker(jdbcUrl, user, password, primaryKeys));
  * </pre>
  */
-public class PGSinker implements Sink<CdcEvent> {
+public class PGSinker implements Sink<MessageNormalized> {
     private static final long serialVersionUID = 1L;
 
     private final String jdbcUrl;
@@ -57,11 +55,11 @@ public class PGSinker implements Sink<CdcEvent> {
         this.jdbcUrl = jdbcUrl;
         this.username = username;
         this.password = password;
-        this.primaryKeys = (Serializable & Map<String, List<String>>) primaryKeys;
+        this.primaryKeys = primaryKeys;
     }
 
     @Override
-    public SinkWriter<CdcEvent> createWriter(InitContext context) throws IOException {
+    public SinkWriter<MessageNormalized> createWriter(InitContext context) throws IOException {
         return new PostgresWriter(jdbcUrl, username, password, primaryKeys);
     }
 }
@@ -86,17 +84,19 @@ public class PGSinker implements Sink<CdcEvent> {
  *   - Consistency: all events in a checkpoint interval succeed or fail together
  *   - Latency trade-off: Postgres lags behind MySQL by up to the checkpoint interval (3s)
  */
-class PostgresWriter implements SinkWriter<CdcEvent> {
+class PostgresWriter implements SinkWriter<MessageNormalized> {
 
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(PostgresWriter.class);
 
+    // Fields on MessageNormalized that are metadata, not database columns
+    private static final Set<String> METADATA_FIELDS = Set.of("op", "table");
+
     private transient HikariDataSource dataSource;
-    private transient ObjectMapper objectMapper;
     private final Map<String, List<String>> primaryKeys;
     // Cache of Postgres column types per table: table -> (column_name -> data_type)
     private final Map<String, Map<String, String>> columnTypeCache = new HashMap<>();
     // Buffer: events accumulate here between checkpoints
-    private final List<CdcEvent> buffer = new ArrayList<>();
+    private final List<MessageNormalized> buffer = new ArrayList<>();
 
     PostgresWriter(
             String jdbcUrl,
@@ -105,7 +105,6 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
             Map<String, List<String>> primaryKeys
     ) {
         this.primaryKeys = primaryKeys;
-        this.objectMapper = new ObjectMapper();
 
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(jdbcUrl);
@@ -116,11 +115,11 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
     }
 
     /**
-     * Called for each CDC event. Does NOT write to Postgres — just buffers.
+     * Called for each MessageNormalized event. Does NOT write to Postgres — just buffers.
      * Validates that we have PK config for the table upfront so errors surface early.
      */
     @Override
-    public void write(CdcEvent event, Context context) throws IOException, InterruptedException {
+    public void write(MessageNormalized event, Context context) throws IOException, InterruptedException {
         String table = event.getTable();
         if (primaryKeys.get(table) == null) {
             throw new IOException("No primary key configured for table: " + table);
@@ -163,18 +162,16 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
             conn.setAutoCommit(false); // BEGIN transaction
 
             try {
-                for (CdcEvent event : buffer) {
+                for (MessageNormalized event : buffer) {
                     String table = event.getTable();
                     List<String> pks = primaryKeys.get(table);
                     String quotedTable = quoteIdentifier(table);
+                    Map<String, Object> columns = extractColumns(event);
 
-                    if (event.isDelete()) {
-                        if (event.getBefore() == null) {
-                            continue;
-                        }
-                        executeDelete(conn, quotedTable, pks, event.getBefore());
+                    if ("d".equals(event.getOp())) {
+                        executeDelete(conn, quotedTable, pks, columns);
                     } else {
-                        executeUpsert(conn, quotedTable, pks, event.getAfter());
+                        executeUpsert(conn, quotedTable, pks, columns);
                     }
                 }
 
@@ -192,44 +189,61 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
     }
 
     /**
+     * Extracts database columns and values from a MessageNormalized POJO via reflection.
+     * Skips static fields and metadata fields (op, table).
+     * Converts camelCase field names to snake_case for Postgres.
+     *
+     * @return ordered map of snake_case column name -> value
+     */
+    private Map<String, Object> extractColumns(MessageNormalized event) throws IllegalAccessException {
+        Map<String, Object> columns = new LinkedHashMap<>();
+        for (Field field : event.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            if (METADATA_FIELDS.contains(field.getName())) {
+                continue;
+            }
+            field.setAccessible(true);
+            String snakeName = camelToSnake(field.getName());
+            columns.put(snakeName, field.get(event));
+        }
+        return columns;
+    }
+
+    /**
      * Builds and executes on the shared connection (within the batch transaction):
      *   INSERT INTO {table} (col1, col2, ...) VALUES (?, ?, ...)
      *   ON CONFLICT (pk1, pk2) DO UPDATE SET col1=EXCLUDED.col1, col2=EXCLUDED.col2, ...
      */
-    private void executeUpsert(Connection conn, String table, List<String> pks, String json) throws Exception {
-        JsonNode row = objectMapper.readTree(json);
-
-        List<String> columns = new ArrayList<>();
-        List<Object> values = new ArrayList<>();
-        row.fields().forEachRemaining(entry -> {
-            columns.add(entry.getKey());
-            values.add(extractValue(entry.getValue()));
-        });
-
+    private void executeUpsert(Connection conn, String table, List<String> pks, Map<String, Object> columns) throws Exception {
         Map<String, String> colTypes = getColumnTypes(table);
-        List<String> quotedColumns = columns.stream().map(this::quoteIdentifier).toList();
+
+        List<String> colNames = new ArrayList<>(columns.keySet());
+        List<Object> values = new ArrayList<>(columns.values());
+        List<String> quotedColumns = colNames.stream().map(this::quoteIdentifier).toList();
         List<String> quotedPks = pks.stream().map(this::quoteIdentifier).toList();
 
         StringBuilder sql = new StringBuilder();
         sql.append("INSERT INTO ").append(table).append(" (");
         sql.append(String.join(", ", quotedColumns));
         sql.append(") VALUES (");
-        sql.append(String.join(", ", columns.stream().map(c -> "?").toList()));
+        sql.append(String.join(", ", colNames.stream().map(c -> "?").toList()));
         sql.append(")");
 
         sql.append(" ON CONFLICT (");
         sql.append(String.join(", ", quotedPks));
         sql.append(") DO UPDATE SET ");
 
-        List<String> updateClauses = columns.stream()
+        List<String> updateClauses = colNames.stream()
                 .filter(c -> !pks.contains(c))
                 .map(c -> quoteIdentifier(c) + " = EXCLUDED." + quoteIdentifier(c))
                 .toList();
         sql.append(String.join(", ", updateClauses));
 
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-            for (int i = 0; i < columns.size(); i++) {
-                String pgType = colTypes.get(columns.get(i));
+            for (int i = 0; i < colNames.size(); i++) {
+                String pgType = colTypes.get(colNames.get(i));
                 ps.setObject(i + 1, convertValue(values.get(i), pgType));
             }
             ps.executeUpdate();
@@ -240,8 +254,7 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
      * Builds and executes on the shared connection (within the batch transaction):
      *   DELETE FROM {table} WHERE pk1 = ? AND pk2 = ?
      */
-    private void executeDelete(Connection conn, String table, List<String> pks, String json) throws Exception {
-        JsonNode row = objectMapper.readTree(json);
+    private void executeDelete(Connection conn, String table, List<String> pks, Map<String, Object> columns) throws Exception {
         Map<String, String> colTypes = getColumnTypes(table);
 
         StringBuilder sql = new StringBuilder();
@@ -255,26 +268,11 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < pks.size(); i++) {
                 String pk = pks.get(i);
-                Object val = extractValue(row.get(pk));
+                Object val = columns.get(pk);
                 ps.setObject(i + 1, convertValue(val, colTypes.get(pk)));
             }
             ps.executeUpdate();
         }
-    }
-
-    private Object extractValue(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null;
-        }
-        return switch (node.getNodeType()) {
-            case NUMBER -> node.isInt() ? node.intValue()
-                         : node.isLong() ? node.longValue()
-                         : node.isFloat() ? node.floatValue()
-                         : node.doubleValue();
-            case BOOLEAN -> node.booleanValue();
-            case STRING  -> node.textValue();
-            default      -> node.asText();
-        };
     }
 
     /**
@@ -317,6 +315,10 @@ class PostgresWriter implements SinkWriter<CdcEvent> {
         }
         columnTypeCache.put(rawTable, types);
         return types;
+    }
+
+    private static String camelToSnake(String camel) {
+        return camel.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase();
     }
 
     @Override
