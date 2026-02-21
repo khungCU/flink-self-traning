@@ -1,4 +1,5 @@
 # getColumnTypes() — Quick Lesson
+# Deprecate (2/21/2026) 
 
 ## What Is It?
 

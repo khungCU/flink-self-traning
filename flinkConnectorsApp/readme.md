@@ -138,8 +138,118 @@ That's it. No changes needed in `Main.java`, `SchemaNormalizer.java`, or `PGSink
 - **`keyBy(CdcEvent::getTable)`** — all events for a table go to the same Flink subtask, preserving per-table ordering
 - **Batched flush at checkpoints** — `write()` buffers, `flush()` commits all events in one JDBC transaction. Trade-off: Postgres lags behind MySQL by up to the checkpoint interval (3s)
 - **Reflection-based SQL** — PGSinker uses Java reflection on the POJO to extract field names/values, so adding new columns to a POJO automatically flows through to SQL
-- **Column type cache** — PGSinker queries `information_schema.columns` once per table to handle type mismatches (e.g. MySQL `TINYINT(1)` -> Postgres `boolean`)
+- **Type conversion via POJO** — Jackson coerces MySQL types into the correct Java types when deserializing into typed POJOs (e.g. `0/1` -> `Boolean`), so PGSinker doesn't need to query Postgres `information_schema` for column types
 - **Schema drift detection** — unregistered tables emit to a `schema-drift` side output for monitoring/alerting
+
+## Design Evolution: V0 vs Current
+
+This project went through two design iterations. Both are preserved in the codebase — V0 files are kept for comparison.
+
+### V0: Single-Table, Typed CDC Events (`MainV0.java`)
+
+```
+MySQL binlog
+    |
+    v
+ShipmentDebeziumDeserializer     -- Struct -> ShipmentCdcEvent (hardcoded to shipments)
+    |                                  |
+    |                           structToShipment()  -- manual field-by-field extraction
+    |                                  |
+    v                                  v
+ShipmentCdcEvent                 before: Shipment (typed POJO)
+  (typed, single-table)          after:  Shipment (typed POJO)
+    |
+    v
+print()                          -- no sink to Postgres in V0
+```
+
+**Files involved:**
+- `ShipmentDebeziumDeserializer` — hardcoded deserializer with `structToShipment()` that manually maps each column: `struct.getInt32("shipment_id")`, `struct.getString("origin")`, etc.
+- `ShipmentCdcEvent` — typed CDC wrapper where `before`/`after` are `Shipment` POJOs (not JSON strings)
+- `Shipment` — the POJO
+
+**Key characteristics:**
+- Deserializer is **coupled to one table** — `structToShipment()` references column names directly
+- Before/after are **typed POJOs** — type-safe but inflexible
+- Boolean conversion is **manual** — explicit `instanceof Short` / `instanceof Integer` checks in deserializer
+- Adding a new table requires: new POJO + new CdcEvent wrapper + new deserializer + new pipeline wiring
+
+### Current: Multi-Table, Generic CDC Events with Reconciliation (`Main.java`)
+
+```
+MySQL binlog
+    |
+    v
+JsonCdcDeserializer              -- Struct -> CdcEvent (any table, JSON strings)
+    |                                  |
+    |                           structToJson()  -- schema-driven iteration, no hardcoded columns
+    |                                  |
+    v                                  v
+CdcEvent                         before: String (raw JSON)
+  (generic, any table)           after:  String (raw JSON)
+    |
+    v  keyBy(table)
+    |
+    v
+SchemaNormalizer                 -- JSON -> typed POJO via Jackson + TableRegistry
+    |                                  |
+    |                           readValue(json, Shipment.class)  -- Jackson handles type coercion
+    |                                  |
+    v                                  v
+MessageNormalized                side outputs per table
+  (Shipment, ShipmentV0, etc.)       |
+    |                                  |
+    v  union                           v
+    |                           Unknown -> schema-drift alerting
+    v
+PGSinker                        -- reflection-based SQL, any table
+```
+
+**Key characteristics:**
+- Deserializer is **table-agnostic** — iterates over `Struct.schema().fields()` dynamically
+- Before/after are **JSON strings** — decoupled from any specific table schema
+- Type coercion is **automatic** — Jackson handles `0/1 -> Boolean` when deserializing into typed POJOs
+- Adding a new table requires: new POJO + one `register()` call in `TableRegistry`
+
+### Side-by-Side Comparison
+
+| Aspect | V0 (Single-Table) | Current (Multi-Table + Reconciliation) |
+|--------|-------------------|---------------------------------------|
+| **Deserializer** | `ShipmentDebeziumDeserializer` — hardcoded column names (`struct.getInt32("shipment_id")`) | `JsonCdcDeserializer` — schema-driven iteration, no column names |
+| **CDC event type** | `ShipmentCdcEvent` with typed `Shipment before/after` | `CdcEvent` with `String before/after` (raw JSON) |
+| **Type conversion** | Manual in deserializer (`instanceof Short`, `instanceof Integer` → boolean) | Automatic by Jackson (`0/1` → `Boolean isArrived`) + POJO field types |
+| **Adding a table** | New POJO + new `XxxCdcEvent` + new `XxxDeserializer` + pipeline wiring in Main | New POJO + one `register()` line in `TableRegistry` |
+| **Files to edit** | 4+ files | 2 files (POJO + TableRegistry) |
+| **Schema drift** | Unknown tables silently ignored or crash | Routed to `schema-drift` side output for alerting |
+| **Sink type info** | N/A (V0 had no sink) | PGSinker uses reflection — no per-table SQL code |
+| **Boolean handling** | Deserializer manually checks `Short`/`Integer`/`Boolean` | Jackson coerces to POJO field type; JDBC maps natively |
+| **Trade-off** | Compile-time safety — all column access is typed | Runtime flexibility — columns discovered via JSON keys + reflection |
+
+### Why the Design Changed
+
+The V0 approach works well for **one or two tables** — you get compile-time type safety and clear, readable code. But it doesn't scale:
+
+```
+V0: Adding 10 tables = 10 POJOs + 10 CdcEvent wrappers + 10 deserializers + 10 pipeline branches
+Current: Adding 10 tables = 10 POJOs + 10 register() lines in one file
+```
+
+The current design pushes table-specific knowledge to **two places only**:
+1. **POJO class** — defines which columns to keep (schema normalization)
+2. **`TableRegistry.register()`** — connects table name, POJO class, and primary keys
+
+Everything else — deserialization, routing, SQL generation, type conversion — is generic and table-agnostic.
+
+### What V0 Does Better
+
+V0 isn't strictly worse — it has advantages for certain use cases:
+
+- **Compile-time column access** — `event.getAfter().getShipmentId()` catches typos at compile time; JSON-based access discovers errors at runtime
+- **IDE support** — autocomplete works on typed POJOs; JSON string fields have no autocomplete
+- **Simpler mental model** — no Jackson, no reflection, no side outputs. The data flow is straightforward: Struct → POJO → done
+- **Better for single-table use cases** — if you're only mirroring one table, V0 has less moving parts
+
+The current design trades these for **scalability and maintainability** when handling many tables.
 
 ## Build & Run
 
@@ -361,7 +471,7 @@ docker exec flink-self-traning-mysql-1 mysql -uroot -p123456 -e "KILL <id>;"
 PSQLException: ERROR: column "is_arrived" is of type boolean but expression is of type double precision
 ```
 
-This is handled automatically by `PGSinker.convertValue()` which queries `information_schema.columns` to discover Postgres column types and converts MySQL `TINYINT(1)` (sent as 0/1) to boolean.
+This is handled automatically by the reconciliation layer. Jackson coerces MySQL `TINYINT(1)` (sent as `0`/`1` in JSON) into `Boolean` when deserializing into typed POJOs (e.g. `Shipment.isArrived`). By the time PGSinker receives the POJO, the value is already a Java `Boolean` — JDBC maps it to Postgres `boolean` natively.
 
 ### Binlog Not Available
 

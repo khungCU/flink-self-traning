@@ -413,6 +413,153 @@ root.get("missing");                  // null (NullPointerException if you chain
 
 ---
 
+## @JsonIgnore — Hiding Fields from Jackson
+
+### The Problem
+
+Sometimes your Java class has fields that **should not appear in JSON**. For example, a `Shipment` POJO might have database columns (`shipmentId`, `origin`) that belong in JSON, but also metadata fields (`op`, `table`) that are only used internally by your application logic — they're not real database columns and should never be serialized to JSON.
+
+Without `@JsonIgnore`, Jackson includes **every** field it can find:
+
+```java
+public class Shipment {
+    private String op;           // metadata: CDC operation type (c/u/d)
+    private String table;        // metadata: source table name
+    private Integer shipmentId;  // real column
+    private String origin;       // real column
+    // getters + setters...
+}
+
+Shipment s = new Shipment();
+s.setOp("c");
+s.setTable("shipments");
+s.setShipmentId(1);
+s.setOrigin("Shanghai");
+
+mapper.writeValueAsString(s);
+// → '{"op":"c","table":"shipments","shipmentId":1,"origin":"Shanghai"}'
+//    ^^^^^^^^  ^^^^^^^^^^^^^^^^^^ — these should NOT be in the JSON!
+```
+
+If this JSON gets written to Postgres, you'd get errors — there are no `op` or `table` columns in the database.
+
+### The Solution: @JsonIgnore
+
+Add `@JsonIgnore` to fields that Jackson should skip:
+
+```java
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
+public class Shipment {
+    @JsonIgnore private String op;      // ignored by Jackson
+    @JsonIgnore private String table;   // ignored by Jackson
+    private Integer shipmentId;         // included
+    private String origin;              // included
+    // getters + setters...
+}
+
+mapper.writeValueAsString(s);
+// → '{"shipmentId":1,"origin":"Shanghai"}'
+//    No op, no table — clean!
+```
+
+`@JsonIgnore` works in **both directions**:
+- **Serialization** (Java → JSON): the field is excluded from JSON output
+- **Deserialization** (JSON → Java): if the JSON contains `"op"`, Jackson silently ignores it instead of setting the field
+
+### Where to Place It
+
+You can put `@JsonIgnore` on the field, the getter, or the setter — all three work:
+
+```java
+// Option 1: On the field (most common, cleanest)
+@JsonIgnore
+private String op;
+
+// Option 2: On the getter (ignores during serialization)
+@JsonIgnore
+public String getOp() { return op; }
+
+// Option 3: On the setter (ignores during deserialization)
+@JsonIgnore
+public void setOp(String op) { this.op = op; }
+```
+
+Placing it on the **field** is the simplest — it covers both directions at once.
+
+### Simple Example
+
+```java
+public class User {
+    private String name;
+    private String email;
+    @JsonIgnore private String passwordHash;   // never expose in JSON
+    @JsonIgnore private boolean isInternal;    // internal flag, not for API
+
+    // getters + setters...
+}
+
+User u = new User();
+u.setName("Alice");
+u.setEmail("alice@example.com");
+u.setPasswordHash("$2b$12$abc...");
+u.setIsInternal(true);
+
+mapper.writeValueAsString(u);
+// → '{"name":"Alice","email":"alice@example.com"}'
+//    passwordHash and isInternal are hidden
+```
+
+### How We Use It in This Project
+
+In `model/Shipment.java`:
+
+```java
+public class Shipment implements MessageNormalized {
+    @JsonIgnore private String op;      // CDC operation type (c/u/d)
+    @JsonIgnore private String table;   // source table name ("shipments")
+
+    private Integer shipmentId;         // database column
+    private Integer orderId;            // database column
+    private String origin;              // database column
+    private String destination;         // database column
+    private Boolean isArrived;          // database column
+}
+```
+
+**Why do `op` and `table` need `@JsonIgnore`?** Because of how the pipeline works:
+
+```
+SchemaNormalizer                          PGSinker
+─────────────────                         ────────
+Jackson readValue(json, Shipment.class)   Java reflection: getDeclaredFields()
+  → sets shipmentId, origin, etc.           → extracts field names + values
+                                            → skips "op" and "table" via METADATA_FIELDS set
+Then manually:                              → builds SQL from remaining fields
+  normalized.setOp(event.getOp())
+  normalized.setTable(table)
+```
+
+1. **`SchemaNormalizer`** deserializes CDC JSON into `Shipment` using Jackson `readValue()`. The JSON from MySQL contains only database columns (`shipment_id`, `origin`, etc.) — there's no `op` or `table` in it. After deserialization, `SchemaNormalizer` manually sets `op` and `table` as routing metadata.
+
+2. **`PGSinker`** uses Java reflection (not Jackson) to extract fields from the POJO for SQL generation. It has a `METADATA_FIELDS` set containing `"op"` and `"table"` to skip those fields. The `@JsonIgnore` is not what PGSinker checks — it has its own exclusion logic.
+
+3. **`@JsonIgnore` prevents accidents**: if anyone ever serializes a `Shipment` back to JSON (e.g. for logging or debugging), the metadata fields won't leak into the output. It's a safety net that keeps the JSON representation clean — only real database columns appear.
+
+### @JsonIgnore vs Other Approaches
+
+| Approach | When to Use |
+|----------|-------------|
+| `@JsonIgnore` on field | Permanently hide a field from all JSON operations |
+| `@JsonIgnoreProperties({"op", "table"})` on class | Ignore multiple fields at once, declared at class level |
+| `FAIL_ON_UNKNOWN_PROPERTIES = false` on ObjectMapper | Ignore unknown JSON fields during deserialization (different — this handles extra fields in incoming JSON, not fields on your POJO) |
+
+In our project, we use **both** `@JsonIgnore` and `FAIL_ON_UNKNOWN_PROPERTIES = false`:
+- `@JsonIgnore` on `op`/`table` — keeps metadata out of JSON
+- `FAIL_ON_UNKNOWN_PROPERTIES = false` in `SchemaNormalizer` — silently drops extra MySQL columns that don't exist in the POJO (schema normalization)
+
+---
+
 ## Takeaways
 
 ### What You Should Learn From This Doc
@@ -421,6 +568,7 @@ root.get("missing");                  // null (NullPointerException if you chain
 2. **Three approaches exist** — POJO binding (`readValue`/`writeValueAsString`), tree model (`readTree` → `JsonNode`), and manual build (`ObjectNode`). Pick based on whether your schema is known at compile time
 3. **JsonNode is read-only, ObjectNode is mutable** — `readTree()` gives you `JsonNode` for reading; `createObjectNode()` gives you `ObjectNode` for building. ObjectNode extends JsonNode
 4. **ObjectMapper is NOT serializable** — in Flink, mark it `transient` and recreate lazily. This is a common gotcha that causes `NotSerializableException` at deploy time
+5. **`@JsonIgnore` hides fields from JSON** — use it on metadata fields (like `op`, `table`) that exist on your POJO for application logic but should never appear in JSON output or be set from JSON input
 
 ### How This Helps You Understand the Flink Application
 

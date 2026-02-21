@@ -5,10 +5,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -93,8 +91,6 @@ class PostgresWriter implements SinkWriter<MessageNormalized> {
 
     private transient HikariDataSource dataSource;
     private final Map<String, List<String>> primaryKeys;
-    // Cache of Postgres column types per table: table -> (column_name -> data_type)
-    private final Map<String, Map<String, String>> columnTypeCache = new HashMap<>();
     // Buffer: events accumulate here between checkpoints
     private final List<MessageNormalized> buffer = new ArrayList<>();
 
@@ -217,8 +213,6 @@ class PostgresWriter implements SinkWriter<MessageNormalized> {
      *   ON CONFLICT (pk1, pk2) DO UPDATE SET col1=EXCLUDED.col1, col2=EXCLUDED.col2, ...
      */
     private void executeUpsert(Connection conn, String table, List<String> pks, Map<String, Object> columns) throws Exception {
-        Map<String, String> colTypes = getColumnTypes(table);
-
         List<String> colNames = new ArrayList<>(columns.keySet());
         List<Object> values = new ArrayList<>(columns.values());
         List<String> quotedColumns = colNames.stream().map(this::quoteIdentifier).toList();
@@ -242,9 +236,8 @@ class PostgresWriter implements SinkWriter<MessageNormalized> {
         sql.append(String.join(", ", updateClauses));
 
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-            for (int i = 0; i < colNames.size(); i++) {
-                String pgType = colTypes.get(colNames.get(i));
-                ps.setObject(i + 1, convertValue(values.get(i), pgType));
+            for (int i = 0; i < values.size(); i++) {
+                ps.setObject(i + 1, values.get(i));
             }
             ps.executeUpdate();
         }
@@ -255,8 +248,6 @@ class PostgresWriter implements SinkWriter<MessageNormalized> {
      *   DELETE FROM {table} WHERE pk1 = ? AND pk2 = ?
      */
     private void executeDelete(Connection conn, String table, List<String> pks, Map<String, Object> columns) throws Exception {
-        Map<String, String> colTypes = getColumnTypes(table);
-
         StringBuilder sql = new StringBuilder();
         sql.append("DELETE FROM ").append(table).append(" WHERE ");
 
@@ -268,53 +259,10 @@ class PostgresWriter implements SinkWriter<MessageNormalized> {
         try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             for (int i = 0; i < pks.size(); i++) {
                 String pk = pks.get(i);
-                Object val = columns.get(pk);
-                ps.setObject(i + 1, convertValue(val, colTypes.get(pk)));
+                ps.setObject(i + 1, columns.get(pk));
             }
             ps.executeUpdate();
         }
-    }
-
-    /**
-     * Converts a value to match the Postgres column type.
-     * Handles MySQL CDC quirks like boolean sent as 0/1 integer.
-     */
-    private Object convertValue(Object val, String pgType) {
-        if (val == null || pgType == null) {
-            return val;
-        }
-        if ("boolean".equalsIgnoreCase(pgType) || "bool".equalsIgnoreCase(pgType)) {
-            if (val instanceof Number n) {
-                return n.intValue() != 0;
-            }
-        }
-        return val;
-    }
-
-    /**
-     * Queries Postgres information_schema for column types of a table.
-     * Results are cached per table for the lifetime of this writer.
-     */
-    private Map<String, String> getColumnTypes(String table) throws SQLException {
-        // table is already quoted like "shipments", strip quotes for the query
-        String rawTable = table.replace("\"", "");
-        if (columnTypeCache.containsKey(rawTable)) {
-            return columnTypeCache.get(rawTable);
-        }
-
-        Map<String, String> types = new HashMap<>();
-        String sql = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, rawTable);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    types.put(rs.getString("column_name"), rs.getString("data_type"));
-                }
-            }
-        }
-        columnTypeCache.put(rawTable, types);
-        return types;
     }
 
     private static String camelToSnake(String camel) {
