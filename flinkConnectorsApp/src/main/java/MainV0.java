@@ -10,6 +10,13 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import deserializer.ShipmentDebeziumDeserializer;
 import model.ShipmentCdcEvent;
 
+/*
+Raw cdc event capture
+Without any design pattern applied.
+Compare with Main.java which applies the workflow pattern to abstract away the plumbing and let us focus on the business logic.
+*/
+
+
 public class MainV0 {
     public static void main(String[] args) throws Exception {
         Properties props = new Properties();

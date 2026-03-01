@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.apache.flink.util.OutputTag;
 
@@ -117,6 +118,24 @@ public class TableRegistry implements Serializable {
      */
     public Collection<OutputTag<MessageNormalized>> getAllKnownTags() {
         return tables.values().stream().map(TableConfig::outputTag).toList();
+    }
+
+    /**
+     * Returns the MySqlSource-compatible tableList string derived from registered tables.
+     *
+     * MySqlSource.tableList expects fully-qualified "database.table" names, e.g.
+     * "db_1.shipments,db_1.shipments_v0". This method derives that list from the
+     * registry so MySqlSource and TableRegistry always stay in sync — adding a table
+     * to register() automatically includes it in the CDC capture without touching
+     * application.properties or Main.java.
+     *
+     * @param database the MySQL database name (e.g. "db_1")
+     * @return comma-separated fully-qualified table names ready for MySqlSource.tableList()
+     */
+    public String toMySqlTableList(String database) {
+        return tables.keySet().stream()
+                .map(table -> database + "." + table)
+                .collect(Collectors.joining(","));
     }
 
     /**

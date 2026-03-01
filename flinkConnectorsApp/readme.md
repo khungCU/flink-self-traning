@@ -31,8 +31,14 @@ SchemaNormalizer               -- JSON -> typed POJO via Jackson, routed to side
 
 | Class | Role |
 |-------|------|
-| `Main.java` | Pipeline wiring. Configures MySqlSource, checkpointing (3s), creates `TableRegistry`, connects SchemaNormalizer, unions side outputs, and sinks to Postgres. |
+| `Main.java` | Infrastructure setup only. Loads `application.properties`, creates `StreamExecutionEnvironment` with checkpointing (3s), builds `MySqlSource`, `TableRegistry`, and `PGSinker`, then delegates all pipeline assembly to `DBSyncWithSchemaWorkflow.Builder`. |
 | `MainV0.java` | Earlier single-table version kept for reference. |
+
+### Workflows
+
+| Class | Role |
+|-------|------|
+| `DBSyncWithSchemaWorkflow` | Pipeline assembly for CDC sync. Accepts a pluggable `DataStream<CdcEvent>` source, `TableRegistry`, and `Sink<MessageNormalized>`. Supports two configuration styles: `Builder` (validated at `build()`) and direct construction with chained `setSource / setRegistry / setSink` setters (validated at `execute()`). |
 
 ### Deserializer
 
@@ -55,7 +61,7 @@ SchemaNormalizer               -- JSON -> typed POJO via Jackson, routed to side
 
 | Class | Role |
 |-------|------|
-| `TableRegistry` | **Single source of truth** for all per-table config: POJO class, primary keys, and Flink `OutputTag`. Adding a new table = one `register()` call here. No other files need editing. |
+| `TableRegistry` | **Single source of truth** for all per-table config: POJO class, primary keys, and Flink `OutputTag`. Also produces the `MySqlSource`-compatible `tableList` string via `toMySqlTableList(database)`, so Debezium capture and Flink pipeline handling are always in sync. Adding a new table = one `register()` call here. No other files need editing. |
 | `SchemaNormalizer` | Flink `KeyedProcessFunction` that deserializes `CdcEvent` JSON into typed POJOs using Jackson. Routes each event to the correct side output based on `TableRegistry`. Unknown tables go to the schema-drift output. |
 
 ### Sinkers
@@ -117,21 +123,21 @@ Parameters:
 - **POJO class** — the `MessageNormalized` implementation from step 1
 - **Primary keys** — snake_case column names used for Postgres `ON CONFLICT` and `DELETE WHERE`
 
-That's it. No changes needed in `Main.java`, `SchemaNormalizer.java`, or `PGSinker.java`.
+That's it. No changes needed in `Main.java`, `SchemaNormalizer.java`, `PGSinker.java`, or `application.properties`.
 
 ### What happens automatically
 
 - `SchemaNormalizer` picks up the new POJO class and deserializes CDC JSON into it
 - A new Flink side output is created and routed automatically
-- `Main` unions the new side output into the Postgres-bound stream
+- `DBSyncWithSchemaWorkflow` unions the new side output into the Postgres-bound stream
 - `PGSinker` uses the registered primary keys for upsert/delete SQL
+- `toMySqlTableList()` includes the new table in `MySqlSource.tableList` automatically
 - Extra columns in MySQL that don't exist in the POJO are silently dropped (Jackson `FAIL_ON_UNKNOWN_PROPERTIES=false`)
 - Missing columns default to null
 
 ### Prerequisites
 
 - The target Postgres table must already exist with matching column names (snake_case)
-- The MySQL table must be included in the `mysql.table` property in `application.properties`
 
 ## Key Design Decisions
 
@@ -140,6 +146,8 @@ That's it. No changes needed in `Main.java`, `SchemaNormalizer.java`, or `PGSink
 - **Reflection-based SQL** — PGSinker uses Java reflection on the POJO to extract field names/values, so adding new columns to a POJO automatically flows through to SQL
 - **Type conversion via POJO** — Jackson coerces MySQL types into the correct Java types when deserializing into typed POJOs (e.g. `0/1` -> `Boolean`), so PGSinker doesn't need to query Postgres `information_schema` for column types
 - **Schema drift detection** — unregistered tables emit to a `schema-drift` side output for monitoring/alerting
+- **`TableRegistry` as single source of truth** — `toMySqlTableList(database)` derives the CDC capture list directly from registered tables, so `MySqlSource` and `TableRegistry` are always in sync without manual `application.properties` maintenance
+- **Builder pattern for pipeline** — `DBSyncWithSchemaWorkflow` decouples pipeline assembly from infrastructure. Source and sink are pluggable: swap `MySqlSource` for `env.fromElements(...)` and `PGSinker` for a test sink without touching the workflow logic
 
 ## Design Evolution: V0 vs Current
 
@@ -266,8 +274,10 @@ Config in `src/main/resources/application.properties`.
 
 ```
 flinkConnectorsApp/src/main/java/
-├── Main.java                              # Pipeline entry point
+├── Main.java                              # Infrastructure setup + workflow wiring
 ├── MainV0.java                            # Earlier single-table version (reference)
+├── workflows/
+│   └── DBSyncWithSchemaWorkflow.java      # Pipeline assembly (Builder + fluent setters)
 ├── model/
 │   ├── CdcEvent.java                      # Generic CDC event (JSON-based, any table)
 │   ├── MessageNormalized.java             # Interface for all table POJOs
@@ -279,7 +289,7 @@ flinkConnectorsApp/src/main/java/
 │   ├── JsonCdcDeserializer.java           # Debezium -> CdcEvent (table-agnostic)
 │   └── ShipmentDebeziumDeserializer.java  # Legacy single-table deserializer
 ├── reconciliation/
-│   ├── TableRegistry.java                 # Single source of truth for table config
+│   ├── TableRegistry.java                 # Single source of truth for table config + MySqlSource tableList
 │   └── SchemaNormalizer.java              # JSON -> typed POJO + side output routing
 └── sinker/
     ├── PGSinker.java                      # Postgres sink (upsert/delete, batched)
@@ -313,7 +323,6 @@ docker exec flink-self-traning-mysql-1 mysql -uroot -p123456 -e "
   GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'mysqluser'@'%';
   GRANT SELECT ON db_1.* TO 'mysqluser'@'%';
   FLUSH PRIVILEGES;
-"
 ```
 
 ### 3. Create Matching Tables in Postgres
@@ -344,7 +353,7 @@ docker exec -it postgres psql -U postgres -d pgdb -e "
 mysql.hostname=localhost
 mysql.port=3306
 mysql.database=db_1
-mysql.table=db_1.shipments,db_1.shipments_v0
+# mysql.table is no longer needed — derived automatically from TableRegistry.toMySqlTableList()
 mysql.username=mysqluser
 mysql.password=mysqlpw
 

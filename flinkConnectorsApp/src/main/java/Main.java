@@ -5,16 +5,13 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.cdc.connectors.mysql.source.MySqlSource;
 import org.apache.flink.cdc.connectors.mysql.table.StartupOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.util.OutputTag;
 
 import deserializer.JsonCdcDeserializer;
 import model.CdcEvent;
-import model.MessageNormalized;
-import reconciliation.SchemaNormalizer;
 import reconciliation.TableRegistry;
 import sinker.PGSinker;
+import workflows.DBSyncWithSchemaWorkflow;
 
 public class Main {
     public static void main(String[] args) throws Exception {
@@ -26,59 +23,50 @@ public class Main {
             props.load(input);
         }
 
-        MySqlSource<CdcEvent> mySQLSource = MySqlSource.<CdcEvent>builder()
-            .hostname(props.getProperty("mysql.hostname"))
-            .port(Integer.parseInt(props.getProperty("mysql.port")))
-            .databaseList(props.getProperty("mysql.database"))
-            .tableList(props.getProperty("mysql.table"))
-            .username(props.getProperty("mysql.username"))
-            .password(props.getProperty("mysql.password"))
-            .serverId("7100-7104")
-            .serverTimeZone("UTC")
-            .deserializer(new JsonCdcDeserializer())
-            .startupOptions(StartupOptions.latest())
-            .build();
+        // --- Infrastructure setup ---
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.enableCheckpointing(3000);
 
-        // Set parallelism to 1 for CDC source - MySQL binlog is a single stream
-        DataStream<CdcEvent> cdcStream = env.fromSource(mySQLSource, WatermarkStrategy.noWatermarks(), "MySQL Source")
-            .setParallelism(1);
-
-        cdcStream.print();
-
-        // Single source of truth for all per-table config
         TableRegistry registry = new TableRegistry();
 
-        // Build Postgres JDBC URL from properties
+        MySqlSource<CdcEvent> mysqlSource = MySqlSource.<CdcEvent>builder()
+                .hostname(props.getProperty("mysql.hostname"))
+                .port(Integer.parseInt(props.getProperty("mysql.port")))
+                .databaseList(props.getProperty("mysql.database"))
+                .tableList(registry.toMySqlTableList(props.getProperty("mysql.database")))
+                .username(props.getProperty("mysql.username"))
+                .password(props.getProperty("mysql.password"))
+                .serverId("7100-7104")
+                .serverTimeZone("UTC")
+                .deserializer(new JsonCdcDeserializer())
+                .startupOptions(StartupOptions.latest())
+                .build();
+
+        // Parallelism 1: MySQL binlog is a single stream, so only one reader makes sense
+        DataStream<CdcEvent> cdcStream = env
+                .fromSource(mysqlSource, WatermarkStrategy.noWatermarks(), "MySQL Source")
+                .setParallelism(1);
+
         String pgJdbcUrl = String.format("jdbc:postgresql://%s:%s/%s",
-            props.getProperty("postgres.hostname"),
-            props.getProperty("postgres.port"),
-            props.getProperty("postgres.database"));
+                props.getProperty("postgres.hostname"),
+                props.getProperty("postgres.port"),
+                props.getProperty("postgres.database"));
 
-        // Normalize CDC events into typed POJOs, routed via per-table side outputs
-        SingleOutputStreamOperator<MessageNormalized> processed = cdcStream
-            .keyBy(CdcEvent::getTable)
-            .process(new SchemaNormalizer(registry));
+        PGSinker sink = new PGSinker(
+                pgJdbcUrl,
+                props.getProperty("postgres.username"),
+                props.getProperty("postgres.password"),
+                registry.getPrimaryKeys()
+        );
 
-        // Log schema-drift events (unknown tables) for alerting
-        processed.getSideOutput(registry.getUnknownTag()).print("schema-drift");
+        // --- Workflow assembly + execution ---
 
-        // Union known-table side outputs and sink to Postgres
-        DataStream<MessageNormalized> normalizedStream = null;
-        for (OutputTag<MessageNormalized> tag : registry.getAllKnownTags()) {
-            DataStream<MessageNormalized> sideOutput = processed.getSideOutput(tag);
-            normalizedStream = (normalizedStream == null) ? sideOutput : normalizedStream.union(sideOutput);
-        }
-
-        normalizedStream.sinkTo(new PGSinker(
-            pgJdbcUrl,
-            props.getProperty("postgres.username"),
-            props.getProperty("postgres.password"),
-            registry.getPrimaryKeys()
-        ));
-
-        env.execute("MySQL to Postgres CDC Mirror");
+        new DBSyncWithSchemaWorkflow.Builder()
+                .cdcSourceDataStream(cdcStream)
+                .registry(registry)
+                .sink(sink)
+                .build()
+                .execute();
     }
 }
