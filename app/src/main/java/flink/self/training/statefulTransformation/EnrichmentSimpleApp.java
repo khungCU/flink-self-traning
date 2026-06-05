@@ -1,6 +1,7 @@
 package flink.self.training.statefulTransformation;
 
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
@@ -15,8 +16,7 @@ public class EnrichmentSimpleApp {
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-
-        DataStream<Event> eventSource = env.fromElements(
+        DataStream<Event> eventSourceRenamed = env.fromElements(
             new Event("login", 1, 1000L),
             new Event("login", 2, 3000L),
             new Event("search", 1, 5000L),
@@ -27,12 +27,11 @@ public class EnrichmentSimpleApp {
         );
 
         DataStream<User> userSource = env.fromElements(
-            new User(1, "Ken", "male", true),
-            new User(2, "Alex", "female", false)
+                new User(1, "Ken", "male", true),
+                new User(2, "Alex", "female", false)
         );
-
         // Same code with Kafka/continuous streams: ❌ Dangerous - memory leak, will crash
-        DataStream<EventUserEnrichment> joinedStream =  eventSource.join(userSource)
+        DataStream<EventUserEnrichment> joinedStream =  eventSourceRenamed.join(userSource)
                                                                   .where(k -> k.getUserId())
                                                                   .equalTo(k -> k.getId())
                                                                   .window(GlobalWindows.create())

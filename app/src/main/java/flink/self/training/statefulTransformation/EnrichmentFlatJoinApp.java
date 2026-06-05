@@ -81,6 +81,6 @@ public class EnrichmentFlatJoinApp {
         res.print("Flat map Enrichment");
         env.execute();
 
-    }
+    }/**/
 
 }

@@ -70,6 +70,15 @@ dependencies {
     implementation project(':models')
 }
 
+// Apply the Java 9+ module-system opens required by Flink/Kryo serialization to
+// EVERY JavaExec task. This includes IntelliJ's synthetic ":app:...main()" task
+// (created when you click ▶ next to a main method), which does NOT inherit the
+// `run` task's jvmArgs or application{ applicationDefaultJvmArgs }.
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED',
+            '--add-opens=java.base/java.util=ALL-UNNAMED'
+}
+
 run {
     // Load environment variables from .env file
     def envFile = new File(project.rootDir, '.env')
@@ -81,12 +90,6 @@ run {
             }
         }
     }
-
-    // Add JVM options for Java 9+ module system compatibility
-    jvmArgs = [
-        '--add-opens=java.base/java.lang=ALL-UNNAMED',
-        '--add-opens=java.base/java.util=ALL-UNNAMED'
-    ]
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
@@ -98,7 +101,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = 'flink.self.traning.statefulTransformation.EnrichmentSimpleApp'
+    mainClass = 'flink.self.training.statefulTransformation.EnrichmentSimpleApp'
     applicationDefaultJvmArgs = [
         '--add-opens=java.base/java.lang=ALL-UNNAMED',
         '--add-opens=java.base/java.util=ALL-UNNAMED'
